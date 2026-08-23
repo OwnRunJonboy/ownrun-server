@@ -135,7 +135,16 @@ $router->add('POST', '/jobs', function () use ($jobs, $requireUser): void {
             if (array_key_exists('max_tool_iterations', $body) && $body['max_tool_iterations'] !== null) {
                 $maxIter = (int) $body['max_tool_iterations'];
             }
-            $job = $jobs->createAgent($userId, $model, $prompt, $profile, $systemPrompt, $maxIter);
+            $project = isset($body['project']) ? trim((string) $body['project']) : null;
+            $job = $jobs->createAgent(
+                $userId,
+                $model,
+                $prompt,
+                $profile,
+                $systemPrompt,
+                $maxIter,
+                $project,
+            );
         } elseif ($type === 'ollama.chat') {
             $job = $jobs->create($userId, $model, $prompt, $systemPrompt);
         } else {
@@ -223,7 +232,11 @@ $router->add('POST', '/runner/heartbeat', function () use ($runners, $requireRun
     if (isset($body['agent_models']) && is_array($body['agent_models'])) {
         $agentModels = array_map('strval', $body['agent_models']);
     }
-    $runners->heartbeat($runnerId, $models, $agentProfiles, $agentModels);
+    $agentProjects = null;
+    if (isset($body['agent_projects']) && is_array($body['agent_projects'])) {
+        $agentProjects = array_map('strval', $body['agent_projects']);
+    }
+    $runners->heartbeat($runnerId, $models, $agentProfiles, $agentModels, $agentProjects);
     Response::json(['ok' => true]);
 });
 

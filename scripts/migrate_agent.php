@@ -75,4 +75,12 @@ if (!columnExists($pdo, 'runners', 'agent_models')) {
     echo "runners.agent_models already present\n";
 }
 
+if (!columnExists($pdo, 'runners', 'agent_projects')) {
+    $pdo->exec('ALTER TABLE runners ADD COLUMN agent_projects JSON NULL AFTER agent_models');
+    echo "Added runners.agent_projects\n";
+    $changes++;
+} else {
+    echo "runners.agent_projects already present\n";
+}
+
 echo $changes === 0 ? "Nothing to migrate.\n" : "Done ({$changes} change(s)).\n";

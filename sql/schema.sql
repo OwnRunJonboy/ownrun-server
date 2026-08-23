@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS runners (
     available_models JSON NULL,
     agent_profiles JSON NULL,
     agent_models JSON NULL,
+    agent_projects JSON NULL,
     UNIQUE KEY uk_name (name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

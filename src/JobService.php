@@ -57,10 +57,34 @@ final class JobService
         string $profile,
         ?string $systemPrompt = null,
         ?int $maxToolIterations = null,
+        ?string $project = null,
     ): array {
         $allowed = Config::get('agent_profiles', ['workspace', 'web', 'workspace_web']);
         if (!is_array($allowed) || !in_array($profile, $allowed, true)) {
             throw new \InvalidArgumentException('Unknown agent profile');
+        }
+
+        $needsProject = in_array($profile, ['workspace', 'workspace_web'], true);
+        $projectName = $project !== null ? trim($project) : '';
+        if ($needsProject) {
+            if ($projectName === '') {
+                throw new \InvalidArgumentException('Project is required for this agent profile');
+            }
+            if (!self::isValidProjectName($projectName)) {
+                throw new \InvalidArgumentException(
+                    'Invalid project name: use 1–64 chars starting with a letter or digit; '
+                    . "only letters, digits, '.', '_', and '-' allowed"
+                );
+            }
+        } elseif ($projectName !== '') {
+            if (!self::isValidProjectName($projectName)) {
+                throw new \InvalidArgumentException(
+                    'Invalid project name: use 1–64 chars starting with a letter or digit; '
+                    . "only letters, digits, '.', '_', and '-' allowed"
+                );
+            }
+        } else {
+            $projectName = '';
         }
 
         $defaultIter = (int) Config::get('agent_default_tool_iterations', 8);
@@ -72,13 +96,18 @@ final class JobService
             );
         }
 
-        return $this->insertJob($userId, 'agent.task', [
+        $payload = [
             'model' => $model,
             'prompt' => $prompt,
             'system_prompt' => $systemPrompt,
             'profile' => $profile,
             'max_tool_iterations' => $iterations,
-        ]);
+        ];
+        if ($projectName !== '') {
+            $payload['project'] = $projectName;
+        }
+
+        return $this->insertJob($userId, 'agent.task', $payload);
     }
 
     public function continueFrom(int $userId, int $jobId, string $prompt): ?array
@@ -109,10 +138,19 @@ final class JobService
                 ? (int) $request['max_tool_iterations']
                 : (int) Config::get('agent_default_tool_iterations', 8);
 
+            $parentProject = trim((string) ($request['project'] ?? ''));
+            $needsProject = in_array($profile, ['workspace', 'workspace_web'], true);
+            if ($needsProject && $parentProject === '') {
+                throw new \DomainException('Parent agent job is missing a project');
+            }
+            if ($parentProject !== '' && !self::isValidProjectName($parentProject)) {
+                throw new \DomainException('Parent agent job has an invalid project name');
+            }
+
             $messages = $this->agentContinuationMessages($parent);
             $messages[] = ['role' => 'user', 'content' => $prompt];
 
-            return $this->insertJob($userId, 'agent.task', [
+            $continuePayload = [
                 'model' => $model,
                 'prompt' => $prompt,
                 'system_prompt' => $systemPrompt,
@@ -120,7 +158,12 @@ final class JobService
                 'max_tool_iterations' => $maxIter,
                 'messages' => $messages,
                 'parent_job_id' => (int) $parent['id'],
-            ]);
+            ];
+            if ($parentProject !== '') {
+                $continuePayload['project'] = $parentProject;
+            }
+
+            return $this->insertJob($userId, 'agent.task', $continuePayload);
         }
 
         $messages = $this->conversationFromJob($parent);
@@ -288,6 +331,7 @@ final class JobService
      *   messages?: list<array{role: string, content: string}>,
      *   parent_job_id?: int,
      *   profile?: string,
+     *   project?: string,
      *   max_tool_iterations?: int
      * } $fields
      * @return array<string, mixed>
@@ -310,6 +354,9 @@ final class JobService
         }
         if (isset($fields['profile'])) {
             $payload['profile'] = $fields['profile'];
+        }
+        if (isset($fields['project']) && is_string($fields['project']) && $fields['project'] !== '') {
+            $payload['project'] = $fields['project'];
         }
         if (isset($fields['max_tool_iterations'])) {
             $payload['max_tool_iterations'] = $fields['max_tool_iterations'];
@@ -482,6 +529,11 @@ final class JobService
     }
 
     /** @param array<string, mixed> $row */
+    public static function isValidProjectName(string $name): bool
+    {
+        return (bool) preg_match('/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/', $name);
+    }
+
     private function formatJob(array $row): array
     {
         $progressRaw = $row['progress_payload'] ?? null;

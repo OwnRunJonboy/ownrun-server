@@ -6,4 +6,5 @@ ALTER TABLE jobs
 
 ALTER TABLE runners
     ADD COLUMN agent_profiles JSON NULL AFTER available_models,
-    ADD COLUMN agent_models JSON NULL AFTER agent_profiles;
+    ADD COLUMN agent_models JSON NULL AFTER agent_profiles,
+    ADD COLUMN agent_projects JSON NULL AFTER agent_models;
