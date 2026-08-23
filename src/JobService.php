@@ -38,32 +38,43 @@ final class JobService
 
     public function create(int $userId, string $model, string $prompt, ?string $systemPrompt = null): array
     {
-        $payload = [
+        return $this->insertJob($userId, [
             'model' => $model,
             'prompt' => $prompt,
-        ];
-        if ($systemPrompt !== null && $systemPrompt !== '') {
-            $payload['system_prompt'] = $systemPrompt;
+            'system_prompt' => $systemPrompt,
+        ]);
+    }
+
+    public function continueFrom(int $userId, int $jobId, string $prompt): ?array
+    {
+        $parent = $this->getForUser($userId, $jobId);
+        if ($parent === null) {
+            return null;
+        }
+        if ($parent['status'] !== 'succeeded') {
+            throw new \DomainException('Only succeeded jobs can be continued');
         }
 
-        $encoded = json_encode($payload);
-        $maxBytes = (int) Config::get('max_request_payload_bytes', 65536);
-        if ($encoded === false || strlen($encoded) > $maxBytes) {
-            throw new \InvalidArgumentException('Request payload too large');
+        $request = is_array($parent['request'] ?? null) ? $parent['request'] : [];
+        $model = trim((string) ($request['model'] ?? ''));
+        if ($model === '') {
+            throw new \DomainException('Only succeeded jobs can be continued');
         }
 
-        $stmt = $this->db->prepare(
-            'INSERT INTO jobs (user_id, type, status, request_payload, queued_at)
-             VALUES (?, ?, ?, ?, NOW())'
-        );
-        $stmt->execute([$userId, 'ollama.chat', 'queued', $encoded]);
-        $id = (int) $this->db->lastInsertId();
+        $messages = $this->conversationFromJob($parent);
+        $result = is_array($parent['result'] ?? null) ? $parent['result'] : [];
+        $messages[] = ['role' => 'assistant', 'content' => (string) ($result['text'] ?? '')];
+        $messages[] = ['role' => 'user', 'content' => $prompt];
 
-        $job = $this->getForUser($userId, $id);
-        if ($job === null) {
-            throw new \RuntimeException('Failed to create job');
-        }
-        return $job;
+        $systemPrompt = isset($request['system_prompt']) ? trim((string) $request['system_prompt']) : null;
+
+        return $this->insertJob($userId, [
+            'model' => $model,
+            'prompt' => $prompt,
+            'system_prompt' => $systemPrompt,
+            'messages' => $messages,
+            'parent_job_id' => (int) $parent['id'],
+        ]);
     }
 
     public function cancel(int $userId, int $jobId): ?array
@@ -168,6 +179,94 @@ final class JobService
         );
         $stmt->execute([$errorMessage, $jobId, $runnerId]);
         return $stmt->rowCount() > 0;
+    }
+
+    /**
+     * @param array{
+     *   model: string,
+     *   prompt: string,
+     *   system_prompt?: ?string,
+     *   messages?: list<array{role: string, content: string}>,
+     *   parent_job_id?: int
+     * } $fields
+     * @return array<string, mixed>
+     */
+    private function insertJob(int $userId, array $fields): array
+    {
+        $payload = [
+            'model' => $fields['model'],
+            'prompt' => $fields['prompt'],
+        ];
+        $systemPrompt = $fields['system_prompt'] ?? null;
+        if (is_string($systemPrompt) && $systemPrompt !== '') {
+            $payload['system_prompt'] = $systemPrompt;
+        }
+        if (isset($fields['messages'])) {
+            $payload['messages'] = $fields['messages'];
+        }
+        if (isset($fields['parent_job_id'])) {
+            $payload['parent_job_id'] = $fields['parent_job_id'];
+        }
+
+        $encoded = json_encode($payload);
+        $maxBytes = (int) Config::get('max_request_payload_bytes', 65536);
+        if ($encoded === false || strlen($encoded) > $maxBytes) {
+            throw new \InvalidArgumentException('Request payload too large');
+        }
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO jobs (user_id, type, status, request_payload, queued_at)
+             VALUES (?, ?, ?, ?, NOW())'
+        );
+        $stmt->execute([$userId, 'ollama.chat', 'queued', $encoded]);
+        $id = (int) $this->db->lastInsertId();
+
+        $job = $this->getForUser($userId, $id);
+        if ($job === null) {
+            throw new \RuntimeException('Failed to create job');
+        }
+        return $job;
+    }
+
+    /**
+     * @param array<string, mixed> $job
+     * @return list<array{role: string, content: string}>
+     */
+    private function conversationFromJob(array $job): array
+    {
+        $request = is_array($job['request'] ?? null) ? $job['request'] : [];
+        $raw = $request['messages'] ?? null;
+        if (is_array($raw) && $raw !== []) {
+            $messages = [];
+            foreach ($raw as $item) {
+                if (!is_array($item)) {
+                    continue;
+                }
+                $role = (string) ($item['role'] ?? '');
+                $content = $item['content'] ?? null;
+                if (!in_array($role, ['system', 'user', 'assistant'], true)) {
+                    continue;
+                }
+                if (!is_string($content) && !is_numeric($content)) {
+                    continue;
+                }
+                $messages[] = ['role' => $role, 'content' => (string) $content];
+            }
+            if ($messages !== []) {
+                return $messages;
+            }
+        }
+
+        $messages = [];
+        $system = isset($request['system_prompt']) ? trim((string) $request['system_prompt']) : '';
+        if ($system !== '') {
+            $messages[] = ['role' => 'system', 'content' => $system];
+        }
+        $prompt = (string) ($request['prompt'] ?? '');
+        if ($prompt !== '') {
+            $messages[] = ['role' => 'user', 'content' => $prompt];
+        }
+        return $messages;
     }
 
     /** @return array<string, mixed>|null */

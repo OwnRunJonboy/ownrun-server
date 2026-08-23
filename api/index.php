@@ -161,6 +161,29 @@ $router->add('POST', '/jobs/{id}/requeue', function (array $params) use ($jobs, 
     Response::json($job);
 });
 
+$router->add('POST', '/jobs/{id}/continue', function (array $params) use ($jobs, $requireUser): void {
+    $userId = $requireUser();
+    $body = Request::jsonBody();
+    $prompt = trim((string) ($body['prompt'] ?? ''));
+    if ($prompt === '') {
+        Response::error('Prompt is required', 422);
+        return;
+    }
+
+    try {
+        $job = $jobs->continueFrom($userId, (int) $params['id'], $prompt);
+        if ($job === null) {
+            Response::error('Job not found', 404);
+            return;
+        }
+        Response::json($job, 201);
+    } catch (\DomainException $e) {
+        Response::error($e->getMessage(), 409);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
 // Models / runner status (web)
 $router->add('GET', '/models', function () use ($runners, $requireUser): void {
     $requireUser();
