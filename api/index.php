@@ -114,6 +114,7 @@ $router->add('GET', '/jobs', function () use ($jobs, $requireUser): void {
 $router->add('POST', '/jobs', function () use ($jobs, $requireUser): void {
     $userId = $requireUser();
     $body = Request::jsonBody();
+    $type = trim((string) ($body['type'] ?? 'ollama.chat'));
     $model = trim((string) ($body['model'] ?? ''));
     $prompt = trim((string) ($body['prompt'] ?? ''));
     $systemPrompt = isset($body['system_prompt']) ? trim((string) $body['system_prompt']) : null;
@@ -124,7 +125,23 @@ $router->add('POST', '/jobs', function () use ($jobs, $requireUser): void {
     }
 
     try {
-        $job = $jobs->create($userId, $model, $prompt, $systemPrompt);
+        if ($type === 'agent.task') {
+            $profile = trim((string) ($body['profile'] ?? ''));
+            if ($profile === '') {
+                Response::error('Profile is required for agent jobs', 422);
+                return;
+            }
+            $maxIter = null;
+            if (array_key_exists('max_tool_iterations', $body) && $body['max_tool_iterations'] !== null) {
+                $maxIter = (int) $body['max_tool_iterations'];
+            }
+            $job = $jobs->createAgent($userId, $model, $prompt, $profile, $systemPrompt, $maxIter);
+        } elseif ($type === 'ollama.chat') {
+            $job = $jobs->create($userId, $model, $prompt, $systemPrompt);
+        } else {
+            Response::error('Unsupported job type', 422);
+            return;
+        }
         Response::json($job, 201);
     } catch (\InvalidArgumentException $e) {
         Response::error($e->getMessage(), 422);
@@ -198,7 +215,15 @@ $router->add('POST', '/runner/heartbeat', function () use ($runners, $requireRun
     if (isset($body['available_models']) && is_array($body['available_models'])) {
         $models = array_map('strval', $body['available_models']);
     }
-    $runners->heartbeat($runnerId, $models);
+    $agentProfiles = null;
+    if (isset($body['agent_profiles']) && is_array($body['agent_profiles'])) {
+        $agentProfiles = array_map('strval', $body['agent_profiles']);
+    }
+    $agentModels = null;
+    if (isset($body['agent_models']) && is_array($body['agent_models'])) {
+        $agentModels = array_map('strval', $body['agent_models']);
+    }
+    $runners->heartbeat($runnerId, $models, $agentProfiles, $agentModels);
     Response::json(['ok' => true]);
 });
 
@@ -214,7 +239,28 @@ $router->add('POST', '/runner/jobs/claim', function () use ($jobs, $requireRunne
 
 $router->add('POST', '/runner/jobs/{id}/heartbeat', function (array $params) use ($jobs, $requireRunner): void {
     $runnerId = $requireRunner();
-    $ok = $jobs->heartbeat($runnerId, (int) $params['id']);
+    $result = $jobs->heartbeat($runnerId, (int) $params['id']);
+    if ($result === null) {
+        Response::error('Job not found or not owned by this runner', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'cancel_requested' => (bool) $result['cancel_requested']]);
+});
+
+$router->add('POST', '/runner/jobs/{id}/progress', function (array $params) use ($jobs, $requireRunner): void {
+    $runnerId = $requireRunner();
+    $body = Request::jsonBody();
+    $result = $body['result'] ?? null;
+    if (!is_array($result)) {
+        Response::error('Result payload required', 422);
+        return;
+    }
+    try {
+        $ok = $jobs->progress($runnerId, (int) $params['id'], $result);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
     if (!$ok) {
         Response::error('Job not found or not running', 404);
         return;
@@ -230,9 +276,15 @@ $router->add('POST', '/runner/jobs/{id}/complete', function (array $params) use 
         Response::error('Result payload required', 422);
         return;
     }
-    $ok = $jobs->complete($runnerId, (int) $params['id'], $result);
+    try {
+        $ok = $jobs->complete($runnerId, (int) $params['id'], $result);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
     if (!$ok) {
-        Response::error('Job not found or not running', 404);
+        // Cancelled while finishing — ignore rather than failing the runner upload loop.
+        Response::json(['ok' => false, 'ignored' => true]);
         return;
     }
     Response::json(['ok' => true]);
@@ -244,7 +296,7 @@ $router->add('POST', '/runner/jobs/{id}/fail', function (array $params) use ($jo
     $message = trim((string) ($body['error_message'] ?? 'Job failed'));
     $ok = $jobs->fail($runnerId, (int) $params['id'], $message);
     if (!$ok) {
-        Response::error('Job not found or not running', 404);
+        Response::json(['ok' => false, 'ignored' => true]);
         return;
     }
     Response::json(['ok' => true]);

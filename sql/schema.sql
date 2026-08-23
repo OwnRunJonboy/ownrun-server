@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS runners (
     last_seen_at DATETIME NULL,
     enabled TINYINT(1) NOT NULL DEFAULT 1,
     available_models JSON NULL,
+    agent_profiles JSON NULL,
+    agent_models JSON NULL,
     UNIQUE KEY uk_name (name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -39,6 +41,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     status ENUM('queued', 'running', 'succeeded', 'failed', 'cancelled') NOT NULL DEFAULT 'queued',
     request_payload JSON NOT NULL,
     result_payload JSON NULL,
+    progress_payload JSON NULL,
     error_message TEXT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     queued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

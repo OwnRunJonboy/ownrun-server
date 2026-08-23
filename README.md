@@ -22,9 +22,17 @@ php scripts/setup.php --username=admin --password=your-password
 
 Save the runner token printed by setup — you need it for `ownrun-runner`.
 
-4. Deploy:
+4. If upgrading an existing database for agent jobs:
+
+```bash
+php scripts/migrate_agent.php
+```
+
+5. Deploy:
    - `api/` → web root `/api/`
    - `config.php` → outside web root if your host allows; otherwise keep it one level above `api/` (the default layout).
+
+Optional config keys for agents (see `config.example.php`): `max_result_payload_bytes`, `agent_profiles`, `agent_max_tool_iterations`, `agent_default_tool_iterations`.
 
 ## API
 

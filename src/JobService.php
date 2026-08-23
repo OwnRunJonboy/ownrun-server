@@ -8,6 +8,9 @@ use PDO;
 
 final class JobService
 {
+    private const JOB_SELECT = 'id, type, status, request_payload, result_payload, progress_payload,
+                    error_message, created_at, queued_at, claimed_at, finished_at';
+
     public function __construct(private PDO $db) {}
 
     /** @return list<array<string, mixed>> */
@@ -15,8 +18,7 @@ final class JobService
     {
         $this->expireLeases();
         $stmt = $this->db->prepare(
-            'SELECT id, type, status, request_payload, result_payload, error_message,
-                    created_at, queued_at, claimed_at, finished_at
+            'SELECT ' . self::JOB_SELECT . '
              FROM jobs WHERE user_id = ? ORDER BY id DESC LIMIT 200'
         );
         $stmt->execute([$userId]);
@@ -27,8 +29,7 @@ final class JobService
     {
         $this->expireLeases();
         $stmt = $this->db->prepare(
-            'SELECT id, type, status, request_payload, result_payload, error_message,
-                    created_at, queued_at, claimed_at, finished_at
+            'SELECT ' . self::JOB_SELECT . '
              FROM jobs WHERE id = ? AND user_id = ? LIMIT 1'
         );
         $stmt->execute([$jobId, $userId]);
@@ -36,12 +37,47 @@ final class JobService
         return $row ? $this->formatJob($row) : null;
     }
 
-    public function create(int $userId, string $model, string $prompt, ?string $systemPrompt = null): array
-    {
-        return $this->insertJob($userId, [
+    public function create(
+        int $userId,
+        string $model,
+        string $prompt,
+        ?string $systemPrompt = null,
+    ): array {
+        return $this->insertJob($userId, 'ollama.chat', [
             'model' => $model,
             'prompt' => $prompt,
             'system_prompt' => $systemPrompt,
+        ]);
+    }
+
+    public function createAgent(
+        int $userId,
+        string $model,
+        string $prompt,
+        string $profile,
+        ?string $systemPrompt = null,
+        ?int $maxToolIterations = null,
+    ): array {
+        $allowed = Config::get('agent_profiles', ['workspace', 'web', 'workspace_web']);
+        if (!is_array($allowed) || !in_array($profile, $allowed, true)) {
+            throw new \InvalidArgumentException('Unknown agent profile');
+        }
+
+        $defaultIter = (int) Config::get('agent_default_tool_iterations', 8);
+        $maxIterCap = (int) Config::get('agent_max_tool_iterations', 20);
+        $iterations = $maxToolIterations ?? $defaultIter;
+        if ($iterations < 1 || $iterations > $maxIterCap) {
+            throw new \InvalidArgumentException(
+                "max_tool_iterations must be between 1 and {$maxIterCap}"
+            );
+        }
+
+        return $this->insertJob($userId, 'agent.task', [
+            'model' => $model,
+            'prompt' => $prompt,
+            'system_prompt' => $systemPrompt,
+            'profile' => $profile,
+            'max_tool_iterations' => $iterations,
         ]);
     }
 
@@ -61,14 +97,38 @@ final class JobService
             throw new \DomainException('Only succeeded jobs can be continued');
         }
 
+        $type = (string) ($parent['type'] ?? 'ollama.chat');
+        $systemPrompt = isset($request['system_prompt']) ? trim((string) $request['system_prompt']) : null;
+
+        if ($type === 'agent.task') {
+            $profile = trim((string) ($request['profile'] ?? ''));
+            if ($profile === '') {
+                throw new \DomainException('Parent agent job is missing a profile');
+            }
+            $maxIter = isset($request['max_tool_iterations'])
+                ? (int) $request['max_tool_iterations']
+                : (int) Config::get('agent_default_tool_iterations', 8);
+
+            $messages = $this->agentContinuationMessages($parent);
+            $messages[] = ['role' => 'user', 'content' => $prompt];
+
+            return $this->insertJob($userId, 'agent.task', [
+                'model' => $model,
+                'prompt' => $prompt,
+                'system_prompt' => $systemPrompt,
+                'profile' => $profile,
+                'max_tool_iterations' => $maxIter,
+                'messages' => $messages,
+                'parent_job_id' => (int) $parent['id'],
+            ]);
+        }
+
         $messages = $this->conversationFromJob($parent);
         $result = is_array($parent['result'] ?? null) ? $parent['result'] : [];
         $messages[] = ['role' => 'assistant', 'content' => (string) ($result['text'] ?? '')];
         $messages[] = ['role' => 'user', 'content' => $prompt];
 
-        $systemPrompt = isset($request['system_prompt']) ? trim((string) $request['system_prompt']) : null;
-
-        return $this->insertJob($userId, [
+        return $this->insertJob($userId, 'ollama.chat', [
             'model' => $model,
             'prompt' => $prompt,
             'system_prompt' => $systemPrompt,
@@ -80,10 +140,10 @@ final class JobService
     public function cancel(int $userId, int $jobId): ?array
     {
         $stmt = $this->db->prepare(
-            'UPDATE jobs SET status = ?, finished_at = NOW()
-             WHERE id = ? AND user_id = ? AND status = ?'
+            "UPDATE jobs SET status = 'cancelled', finished_at = NOW(), lease_expires_at = NULL
+             WHERE id = ? AND user_id = ? AND status IN ('queued', 'running')"
         );
-        $stmt->execute(['cancelled', $jobId, $userId, 'queued']);
+        $stmt->execute([$jobId, $userId]);
         if ($stmt->rowCount() === 0) {
             return null;
         }
@@ -94,8 +154,8 @@ final class JobService
     {
         $stmt = $this->db->prepare(
             'UPDATE jobs SET status = ?, runner_id = NULL, result_payload = NULL,
-                    error_message = NULL, claimed_at = NULL, finished_at = NULL,
-                    lease_expires_at = NULL, queued_at = NOW()
+                    progress_payload = NULL, error_message = NULL, claimed_at = NULL,
+                    finished_at = NULL, lease_expires_at = NULL, queued_at = NOW()
              WHERE id = ? AND user_id = ? AND status = ?'
         );
         $stmt->execute(['queued', $jobId, $userId, 'failed']);
@@ -126,7 +186,7 @@ final class JobService
 
             $update = $this->db->prepare(
                 "UPDATE jobs SET status = 'running', runner_id = ?, claimed_at = NOW(),
-                        lease_expires_at = ?
+                        lease_expires_at = ?, progress_payload = NULL
                  WHERE id = ? AND status = 'queued'"
             );
             $update->execute([$runnerId, $leaseExpires, $jobId]);
@@ -145,25 +205,64 @@ final class JobService
         return $this->getById($jobId);
     }
 
-    public function heartbeat(int $runnerId, int $jobId): bool
+    /**
+     * Extend lease while running, or report cancel if the job was cancelled.
+     *
+     * @return array{cancel_requested: bool}|null null if not owned / not found
+     */
+    public function heartbeat(int $runnerId, int $jobId): ?array
     {
+        $stmt = $this->db->prepare(
+            'SELECT status FROM jobs WHERE id = ? AND runner_id = ? LIMIT 1'
+        );
+        $stmt->execute([$jobId, $runnerId]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            return null;
+        }
+
+        $status = (string) $row['status'];
+        if ($status === 'cancelled') {
+            return ['cancel_requested' => true];
+        }
+        if ($status !== 'running') {
+            return null;
+        }
+
         $leaseSeconds = (int) Config::get('job_lease_timeout', 3600);
         $leaseExpires = date('Y-m-d H:i:s', time() + $leaseSeconds);
-        $stmt = $this->db->prepare(
+        $update = $this->db->prepare(
             "UPDATE jobs SET lease_expires_at = ?
              WHERE id = ? AND runner_id = ? AND status = 'running'"
         );
-        $stmt->execute([$leaseExpires, $jobId, $runnerId]);
+        $update->execute([$leaseExpires, $jobId, $runnerId]);
+        if ($update->rowCount() === 0) {
+            // Race: cancelled between SELECT and UPDATE
+            return ['cancel_requested' => true];
+        }
+        return ['cancel_requested' => false];
+    }
+
+    /** @param array<string, mixed> $result */
+    public function progress(int $runnerId, int $jobId, array $result): bool
+    {
+        $encoded = $this->encodeResult($result);
+        $stmt = $this->db->prepare(
+            "UPDATE jobs SET progress_payload = ?
+             WHERE id = ? AND runner_id = ? AND status = 'running'"
+        );
+        $stmt->execute([$encoded, $jobId, $runnerId]);
         return $stmt->rowCount() > 0;
     }
 
     /** @param array<string, mixed> $result */
     public function complete(int $runnerId, int $jobId, array $result): bool
     {
-        $encoded = json_encode($result);
+        $encoded = $this->encodeResult($result);
         $stmt = $this->db->prepare(
             "UPDATE jobs SET status = 'succeeded', result_payload = ?,
-                    finished_at = NOW(), lease_expires_at = NULL, error_message = NULL
+                    progress_payload = NULL, finished_at = NOW(),
+                    lease_expires_at = NULL, error_message = NULL
              WHERE id = ? AND runner_id = ? AND status = 'running'"
         );
         $stmt->execute([$encoded, $jobId, $runnerId]);
@@ -187,11 +286,13 @@ final class JobService
      *   prompt: string,
      *   system_prompt?: ?string,
      *   messages?: list<array{role: string, content: string}>,
-     *   parent_job_id?: int
+     *   parent_job_id?: int,
+     *   profile?: string,
+     *   max_tool_iterations?: int
      * } $fields
      * @return array<string, mixed>
      */
-    private function insertJob(int $userId, array $fields): array
+    private function insertJob(int $userId, string $type, array $fields): array
     {
         $payload = [
             'model' => $fields['model'],
@@ -207,6 +308,12 @@ final class JobService
         if (isset($fields['parent_job_id'])) {
             $payload['parent_job_id'] = $fields['parent_job_id'];
         }
+        if (isset($fields['profile'])) {
+            $payload['profile'] = $fields['profile'];
+        }
+        if (isset($fields['max_tool_iterations'])) {
+            $payload['max_tool_iterations'] = $fields['max_tool_iterations'];
+        }
 
         $encoded = json_encode($payload);
         $maxBytes = (int) Config::get('max_request_payload_bytes', 65536);
@@ -218,7 +325,7 @@ final class JobService
             'INSERT INTO jobs (user_id, type, status, request_payload, queued_at)
              VALUES (?, ?, ?, ?, NOW())'
         );
-        $stmt->execute([$userId, 'ollama.chat', 'queued', $encoded]);
+        $stmt->execute([$userId, $type, 'queued', $encoded]);
         $id = (int) $this->db->lastInsertId();
 
         $job = $this->getForUser($userId, $id);
@@ -226,6 +333,86 @@ final class JobService
             throw new \RuntimeException('Failed to create job');
         }
         return $job;
+    }
+
+    /** @param array<string, mixed> $result */
+    private function encodeResult(array $result): string
+    {
+        $encoded = json_encode($result);
+        $maxBytes = (int) Config::get('max_result_payload_bytes', 524288);
+        if ($encoded === false) {
+            throw new \InvalidArgumentException('Result payload is not valid JSON');
+        }
+        if (strlen($encoded) <= $maxBytes) {
+            return $encoded;
+        }
+
+        // Prefer keeping final text; trim oldest trace steps.
+        if (isset($result['trace']) && is_array($result['trace'])) {
+            $trace = $result['trace'];
+            while (count($trace) > 1) {
+                array_shift($trace);
+                $result['trace'] = $trace;
+                $encoded = json_encode($result);
+                if ($encoded !== false && strlen($encoded) <= $maxBytes) {
+                    return $encoded;
+                }
+            }
+        }
+
+        // Last resort: drop trace entirely.
+        unset($result['trace']);
+        $result['trace_truncated'] = true;
+        $encoded = json_encode($result);
+        if ($encoded === false || strlen($encoded) > $maxBytes) {
+            throw new \InvalidArgumentException('Result payload too large');
+        }
+        return $encoded;
+    }
+
+    /**
+     * Compact history for agent continue: prior user prompts + final answers only.
+     *
+     * @param array<string, mixed> $job
+     * @return list<array{role: string, content: string}>
+     */
+    private function agentContinuationMessages(array $job): array
+    {
+        $request = is_array($job['request'] ?? null) ? $job['request'] : [];
+        $messages = [];
+
+        $raw = $request['messages'] ?? null;
+        if (is_array($raw) && $raw !== []) {
+            foreach ($raw as $item) {
+                if (!is_array($item)) {
+                    continue;
+                }
+                $role = (string) ($item['role'] ?? '');
+                $content = $item['content'] ?? null;
+                if (!in_array($role, ['user', 'assistant'], true)) {
+                    continue;
+                }
+                if (!is_string($content) && !is_numeric($content)) {
+                    continue;
+                }
+                $messages[] = ['role' => $role, 'content' => (string) $content];
+            }
+        }
+
+        if ($messages === []) {
+            $prompt = (string) ($request['prompt'] ?? '');
+            if ($prompt !== '') {
+                $messages[] = ['role' => 'user', 'content' => $prompt];
+            }
+        }
+
+        $result = is_array($job['result'] ?? null) ? $job['result'] : [];
+        $text = (string) ($result['text'] ?? '');
+        if ($text !== '') {
+            $messages[] = ['role' => 'assistant', 'content' => $text];
+        }
+
+        return $messages;
     }
 
     /**
@@ -274,7 +461,7 @@ final class JobService
     {
         $stmt = $this->db->prepare(
             'SELECT id, user_id, runner_id, type, status, request_payload, result_payload,
-                    error_message, created_at, queued_at, claimed_at, finished_at
+                    progress_payload, error_message, created_at, queued_at, claimed_at, finished_at
              FROM jobs WHERE id = ? LIMIT 1'
         );
         $stmt->execute([$jobId]);
@@ -297,12 +484,14 @@ final class JobService
     /** @param array<string, mixed> $row */
     private function formatJob(array $row): array
     {
+        $progressRaw = $row['progress_payload'] ?? null;
         return [
             'id' => (int) $row['id'],
             'type' => $row['type'],
             'status' => $row['status'],
             'request' => json_decode($row['request_payload'], true),
             'result' => $row['result_payload'] ? json_decode($row['result_payload'], true) : null,
+            'progress' => $progressRaw ? json_decode((string) $progressRaw, true) : null,
             'error_message' => $row['error_message'],
             'created_at' => $row['created_at'],
             'queued_at' => $row['queued_at'],
