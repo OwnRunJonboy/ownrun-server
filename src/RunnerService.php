@@ -15,6 +15,7 @@ final class RunnerService
      * @param list<string>|null $agentProfiles
      * @param list<string>|null $agentModels
      * @param list<string>|null $agentProjects
+     * @param string|null $timezone IANA name from the runner
      */
     public function heartbeat(
         int $runnerId,
@@ -22,6 +23,7 @@ final class RunnerService
         ?array $agentProfiles = null,
         ?array $agentModels = null,
         ?array $agentProjects = null,
+        ?string $timezone = null,
     ): void {
         $sets = ['last_seen_at = NOW()'];
         $params = [];
@@ -42,6 +44,11 @@ final class RunnerService
             $sets[] = 'agent_projects = ?';
             $params[] = json_encode(array_values($agentProjects));
         }
+        if ($timezone !== null) {
+            $tz = trim($timezone);
+            $sets[] = 'timezone = ?';
+            $params[] = $tz !== '' ? $tz : null;
+        }
 
         $params[] = $runnerId;
         $sql = 'UPDATE runners SET ' . implode(', ', $sets) . ' WHERE id = ?';
@@ -55,14 +62,15 @@ final class RunnerService
      *   runner_last_seen_at: ?string,
      *   agent_profiles: list<string>,
      *   agent_models: list<string>,
-     *   agent_projects: list<string>
+     *   agent_projects: list<string>,
+     *   timezone: string
      * }
      */
     public function status(): array
     {
         $window = max(0, (int) Config::get('runner_online_window', 60));
         $stmt = $this->db->query(
-            "SELECT last_seen_at, available_models, agent_profiles, agent_models, agent_projects,
+            "SELECT last_seen_at, available_models, agent_profiles, agent_models, agent_projects, timezone,
                     (last_seen_at IS NOT NULL
                      AND last_seen_at >= DATE_SUB(NOW(), INTERVAL {$window} SECOND)) AS online
              FROM runners WHERE enabled = 1 ORDER BY last_seen_at DESC LIMIT 1"
@@ -73,6 +81,7 @@ final class RunnerService
         $agentProfiles = [];
         $agentModels = [];
         $agentProjects = [];
+        $timezone = 'America/New_York';
         $lastSeen = null;
         $online = false;
         if ($row) {
@@ -82,6 +91,10 @@ final class RunnerService
             $agentProfiles = $this->decodeStringList($row['agent_profiles'] ?? null);
             $agentModels = $this->decodeStringList($row['agent_models'] ?? null);
             $agentProjects = $this->decodeStringList($row['agent_projects'] ?? null);
+            $tz = trim((string) ($row['timezone'] ?? ''));
+            if ($tz !== '') {
+                $timezone = $tz;
+            }
         }
 
         return [
@@ -91,6 +104,7 @@ final class RunnerService
             'agent_profiles' => $agentProfiles,
             'agent_models' => $agentModels,
             'agent_projects' => $agentProjects,
+            'timezone' => $timezone,
         ];
     }
 

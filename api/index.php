@@ -15,6 +15,7 @@ spl_autoload_register(function (string $class): void {
 });
 
 use OwnRun\AuthService;
+use OwnRun\CalendarService;
 use OwnRun\Config;
 use OwnRun\Database;
 use OwnRun\JobService;
@@ -40,6 +41,7 @@ try {
 $auth = new AuthService($db);
 $jobs = new JobService($db);
 $runners = new RunnerService($db);
+$calendar = new CalendarService($db);
 $router = new Router();
 
 $requireUser = function () use ($auth): int {
@@ -211,9 +213,104 @@ $router->add('POST', '/jobs/{id}/continue', function (array $params) use ($jobs,
 });
 
 // Models / runner status (web)
-$router->add('GET', '/models', function () use ($runners, $requireUser): void {
-    $requireUser();
-    Response::json($runners->status());
+$router->add('GET', '/models', function () use ($runners, $calendar, $requireUser): void {
+    $userId = $requireUser();
+    $status = $runners->status();
+    $fromCalendar = $calendar->listProjectsForUser($userId);
+    $merged = array_values(array_unique(array_merge($status['agent_projects'], $fromCalendar)));
+    sort($merged, SORT_NATURAL | SORT_FLAG_CASE);
+    $status['calendar_projects'] = $merged;
+    Response::json($status);
+});
+
+$notFoundAgent = static function (\RuntimeException $e): bool {
+    if ($e->getMessage() === 'not_found') {
+        Response::error('Not found', 404);
+        return true;
+    }
+    return false;
+};
+
+// Calendar (web)
+$router->add('GET', '/calendar', function () use ($calendar, $requireUser): void {
+    $userId = $requireUser();
+    $from = trim((string) ($_GET['from'] ?? ''));
+    $to = trim((string) ($_GET['to'] ?? ''));
+    $projectSpecified = array_key_exists('project', $_GET);
+    $project = $projectSpecified ? (string) $_GET['project'] : null;
+    try {
+        Response::json($calendar->listForUser($userId, $from, $to, $project, $projectSpecified));
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('GET', '/calendar/{id}', function (array $params) use ($calendar, $requireUser): void {
+    $userId = $requireUser();
+    $entry = $calendar->getForUser($userId, (int) $params['id']);
+    if ($entry === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($entry);
+});
+
+$router->add('POST', '/calendar', function () use ($calendar, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $entry = $calendar->createForUser($userId, Request::jsonBody());
+        Response::json($entry, 201);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('PATCH', '/calendar/{id}', function (array $params) use ($calendar, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $entry = $calendar->updateForUser($userId, (int) $params['id'], Request::jsonBody());
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($entry === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($entry);
+});
+
+$router->add('POST', '/calendar/{id}', function (array $params) use ($calendar, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $entry = $calendar->updateForUser($userId, (int) $params['id'], Request::jsonBody());
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($entry === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($entry);
+});
+
+$router->add('DELETE', '/calendar/{id}', function (array $params) use ($calendar, $requireUser): void {
+    $userId = $requireUser();
+    if (!$calendar->deleteForUser($userId, (int) $params['id'])) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
+});
+
+$router->add('POST', '/calendar/{id}/delete', function (array $params) use ($calendar, $requireUser): void {
+    $userId = $requireUser();
+    if (!$calendar->deleteForUser($userId, (int) $params['id'])) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
 });
 
 // Runner endpoints
@@ -236,7 +333,11 @@ $router->add('POST', '/runner/heartbeat', function () use ($runners, $requireRun
     if (isset($body['agent_projects']) && is_array($body['agent_projects'])) {
         $agentProjects = array_map('strval', $body['agent_projects']);
     }
-    $runners->heartbeat($runnerId, $models, $agentProfiles, $agentModels, $agentProjects);
+    $timezone = null;
+    if (isset($body['timezone']) && is_string($body['timezone'])) {
+        $timezone = $body['timezone'];
+    }
+    $runners->heartbeat($runnerId, $models, $agentProfiles, $agentModels, $agentProjects, $timezone);
     Response::json(['ok' => true]);
 });
 
@@ -313,6 +414,137 @@ $router->add('POST', '/runner/jobs/{id}/fail', function (array $params) use ($jo
         return;
     }
     Response::json(['ok' => true]);
+});
+
+$router->add('GET', '/runner/jobs/{id}/calendar', function (array $params) use ($calendar, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    $from = trim((string) ($_GET['from'] ?? ''));
+    $to = trim((string) ($_GET['to'] ?? ''));
+    $q = isset($_GET['q']) ? (string) $_GET['q'] : null;
+    try {
+        Response::json($calendar->listForAgent($runnerId, (int) $params['id'], $from, $to, $q));
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+    }
+});
+
+$router->add('GET', '/runner/jobs/{id}/calendar/{entryId}', function (array $params) use ($calendar, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $entry = $calendar->getForAgent($runnerId, (int) $params['id'], (int) $params['entryId']);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if ($entry === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($entry);
+});
+
+$router->add('POST', '/runner/jobs/{id}/calendar', function (array $params) use ($calendar, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $entry = $calendar->createForAgent($runnerId, (int) $params['id'], Request::jsonBody());
+        Response::json($entry, 201);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+    }
+});
+
+$router->add('PATCH', '/runner/jobs/{id}/calendar/{entryId}', function (array $params) use ($calendar, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $entry = $calendar->updateForAgent(
+            $runnerId,
+            (int) $params['id'],
+            (int) $params['entryId'],
+            Request::jsonBody(),
+        );
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if ($entry === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($entry);
+});
+
+$router->add('POST', '/runner/jobs/{id}/calendar/{entryId}', function (array $params) use ($calendar, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $entry = $calendar->updateForAgent(
+            $runnerId,
+            (int) $params['id'],
+            (int) $params['entryId'],
+            Request::jsonBody(),
+        );
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if ($entry === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($entry);
+});
+
+$router->add('DELETE', '/runner/jobs/{id}/calendar/{entryId}', function (array $params) use ($calendar, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $ok = $calendar->deleteForAgent($runnerId, (int) $params['id'], (int) $params['entryId']);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if (!$ok) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['entryId']]);
+});
+
+$router->add('POST', '/runner/jobs/{id}/calendar/{entryId}/delete', function (array $params) use ($calendar, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $ok = $calendar->deleteForAgent($runnerId, (int) $params['id'], (int) $params['entryId']);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if (!$ok) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['entryId']]);
 });
 
 try {
