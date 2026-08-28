@@ -19,6 +19,7 @@ use OwnRun\CalendarService;
 use OwnRun\Config;
 use OwnRun\Database;
 use OwnRun\JobService;
+use OwnRun\JournalService;
 use OwnRun\Request;
 use OwnRun\Response;
 use OwnRun\Router;
@@ -42,7 +43,12 @@ $auth = new AuthService($db);
 $jobs = new JobService($db);
 $runners = new RunnerService($db);
 $calendar = new CalendarService($db);
+$journal = new JournalService($db);
 $router = new Router();
+
+$runnerTimezone = static function () use ($runners): string {
+    return $runners->status()['timezone'] ?? JournalService::DEFAULT_TIMEZONE;
+};
 
 $requireUser = function () use ($auth): int {
     $userId = $auth->validateAccessToken(Request::bearerToken());
@@ -213,19 +219,33 @@ $router->add('POST', '/jobs/{id}/continue', function (array $params) use ($jobs,
 });
 
 // Models / runner status (web)
-$router->add('GET', '/models', function () use ($runners, $calendar, $requireUser): void {
+$router->add('GET', '/models', function () use ($runners, $calendar, $journal, $requireUser): void {
     $userId = $requireUser();
     $status = $runners->status();
     $fromCalendar = $calendar->listProjectsForUser($userId);
-    $merged = array_values(array_unique(array_merge($status['agent_projects'], $fromCalendar)));
-    sort($merged, SORT_NATURAL | SORT_FLAG_CASE);
-    $status['calendar_projects'] = $merged;
+    $mergedCal = array_values(array_unique(array_merge($status['agent_projects'], $fromCalendar)));
+    sort($mergedCal, SORT_NATURAL | SORT_FLAG_CASE);
+    $status['calendar_projects'] = $mergedCal;
+
+    $fromJournal = $journal->listProjectsForUser($userId);
+    $mergedJournal = array_values(array_unique(array_merge($status['agent_projects'], $fromJournal)));
+    sort($mergedJournal, SORT_NATURAL | SORT_FLAG_CASE);
+    $status['journal_projects'] = $mergedJournal;
+
     Response::json($status);
 });
 
 $notFoundAgent = static function (\RuntimeException $e): bool {
     if ($e->getMessage() === 'not_found') {
         Response::error('Not found', 404);
+        return true;
+    }
+    return false;
+};
+
+$forbiddenAgent = static function (\RuntimeException $e): bool {
+    if ($e->getMessage() === 'forbidden') {
+        Response::error('Journal writes require a project on this job', 403);
         return true;
     }
     return false;
@@ -307,6 +327,110 @@ $router->add('DELETE', '/calendar/{id}', function (array $params) use ($calendar
 $router->add('POST', '/calendar/{id}/delete', function (array $params) use ($calendar, $requireUser): void {
     $userId = $requireUser();
     if (!$calendar->deleteForUser($userId, (int) $params['id'])) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
+});
+
+// Journal (web) — register /memory before /{id}
+$router->add('GET', '/journal/memory', function () use ($journal, $requireUser, $runnerTimezone): void {
+    $userId = $requireUser();
+    Response::json($journal->memoryForUser($userId, $runnerTimezone()));
+});
+
+$router->add('GET', '/journal', function () use ($journal, $requireUser): void {
+    $userId = $requireUser();
+    $projectSpecified = array_key_exists('project', $_GET);
+    $project = $projectSpecified ? (string) $_GET['project'] : null;
+    $q = isset($_GET['q']) ? (string) $_GET['q'] : null;
+    $limit = isset($_GET['limit']) ? (int) $_GET['limit'] : JournalService::WEB_LIST_DEFAULT;
+    $beforeDate = isset($_GET['before_date']) ? (string) $_GET['before_date'] : null;
+    $beforeId = isset($_GET['before_id']) ? (int) $_GET['before_id'] : null;
+    if (!isset($_GET['before_id'])) {
+        $beforeId = null;
+    }
+    $from = isset($_GET['from']) ? (string) $_GET['from'] : null;
+    $to = isset($_GET['to']) ? (string) $_GET['to'] : null;
+    try {
+        Response::json($journal->listForUser(
+            $userId,
+            $project,
+            $projectSpecified,
+            $q,
+            $limit,
+            $beforeDate,
+            $beforeId,
+            $from,
+            $to,
+        ));
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('GET', '/journal/{id}', function (array $params) use ($journal, $requireUser): void {
+    $userId = $requireUser();
+    $entry = $journal->getForUser($userId, (int) $params['id']);
+    if ($entry === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($entry);
+});
+
+$router->add('POST', '/journal', function () use ($journal, $requireUser, $runnerTimezone): void {
+    $userId = $requireUser();
+    try {
+        $entry = $journal->createForUser($userId, Request::jsonBody(), $runnerTimezone());
+        Response::json($entry, 201);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('PATCH', '/journal/{id}', function (array $params) use ($journal, $requireUser, $runnerTimezone): void {
+    $userId = $requireUser();
+    try {
+        $entry = $journal->updateForUser($userId, (int) $params['id'], Request::jsonBody(), $runnerTimezone());
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($entry === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($entry);
+});
+
+$router->add('POST', '/journal/{id}', function (array $params) use ($journal, $requireUser, $runnerTimezone): void {
+    $userId = $requireUser();
+    try {
+        $entry = $journal->updateForUser($userId, (int) $params['id'], Request::jsonBody(), $runnerTimezone());
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($entry === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($entry);
+});
+
+$router->add('DELETE', '/journal/{id}', function (array $params) use ($journal, $requireUser): void {
+    $userId = $requireUser();
+    if (!$journal->deleteForUser($userId, (int) $params['id'])) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
+});
+
+$router->add('POST', '/journal/{id}/delete', function (array $params) use ($journal, $requireUser): void {
+    $userId = $requireUser();
+    if (!$journal->deleteForUser($userId, (int) $params['id'])) {
         Response::error('Not found', 404);
         return;
     }
@@ -534,6 +658,141 @@ $router->add('POST', '/runner/jobs/{id}/calendar/{entryId}/delete', function (ar
     $runnerId = $requireRunner();
     try {
         $ok = $calendar->deleteForAgent($runnerId, (int) $params['id'], (int) $params['entryId']);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if (!$ok) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['entryId']]);
+});
+
+// Journal (runner)
+$router->add('GET', '/runner/jobs/{id}/journal', function (array $params) use ($journal, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    $from = trim((string) ($_GET['from'] ?? ''));
+    $to = trim((string) ($_GET['to'] ?? ''));
+    $q = isset($_GET['q']) ? (string) $_GET['q'] : null;
+    try {
+        Response::json($journal->listForAgent($runnerId, (int) $params['id'], $from, $to, $q));
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+    }
+});
+
+$router->add('GET', '/runner/jobs/{id}/journal/{entryId}', function (array $params) use ($journal, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $entry = $journal->getForAgent($runnerId, (int) $params['id'], (int) $params['entryId']);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if ($entry === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($entry);
+});
+
+$router->add('POST', '/runner/jobs/{id}/journal', function (array $params) use ($journal, $requireRunner, $notFoundAgent, $forbiddenAgent, $runnerTimezone): void {
+    $runnerId = $requireRunner();
+    try {
+        $entry = $journal->createForAgent($runnerId, (int) $params['id'], Request::jsonBody(), $runnerTimezone());
+        Response::json($entry, 201);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    } catch (\RuntimeException $e) {
+        if ($forbiddenAgent($e) || $notFoundAgent($e)) {
+            return;
+        }
+        throw $e;
+    }
+});
+
+$router->add('PATCH', '/runner/jobs/{id}/journal/{entryId}', function (array $params) use ($journal, $requireRunner, $notFoundAgent, $runnerTimezone): void {
+    $runnerId = $requireRunner();
+    try {
+        $entry = $journal->updateForAgent(
+            $runnerId,
+            (int) $params['id'],
+            (int) $params['entryId'],
+            Request::jsonBody(),
+            $runnerTimezone(),
+        );
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if ($entry === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($entry);
+});
+
+$router->add('POST', '/runner/jobs/{id}/journal/{entryId}', function (array $params) use ($journal, $requireRunner, $notFoundAgent, $runnerTimezone): void {
+    $runnerId = $requireRunner();
+    try {
+        $entry = $journal->updateForAgent(
+            $runnerId,
+            (int) $params['id'],
+            (int) $params['entryId'],
+            Request::jsonBody(),
+            $runnerTimezone(),
+        );
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if ($entry === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($entry);
+});
+
+$router->add('DELETE', '/runner/jobs/{id}/journal/{entryId}', function (array $params) use ($journal, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $ok = $journal->deleteForAgent($runnerId, (int) $params['id'], (int) $params['entryId']);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if (!$ok) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['entryId']]);
+});
+
+$router->add('POST', '/runner/jobs/{id}/journal/{entryId}/delete', function (array $params) use ($journal, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $ok = $journal->deleteForAgent($runnerId, (int) $params['id'], (int) $params['entryId']);
     } catch (\RuntimeException $e) {
         if (!$notFoundAgent($e)) {
             throw $e;
