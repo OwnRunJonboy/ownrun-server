@@ -42,12 +42,25 @@ final class JobService
         string $model,
         string $prompt,
         ?string $systemPrompt = null,
+        ?string $project = null,
     ): array {
-        return $this->insertJob($userId, 'ollama.chat', [
+        $payload = [
             'model' => $model,
             'prompt' => $prompt,
             'system_prompt' => $systemPrompt,
-        ]);
+        ];
+        $projectName = $project !== null ? trim($project) : '';
+        if ($projectName !== '') {
+            if (!self::isValidProjectName($projectName)) {
+                throw new \InvalidArgumentException(
+                    'Invalid project name: use 1–64 chars starting with a letter or digit; '
+                    . "only letters, digits, '.', '_', and '-' allowed"
+                );
+            }
+            $payload['project'] = $projectName;
+        }
+
+        return $this->insertJob($userId, 'ollama.chat', $payload);
     }
 
     public function createAgent(
@@ -171,13 +184,23 @@ final class JobService
         $messages[] = ['role' => 'assistant', 'content' => (string) ($result['text'] ?? '')];
         $messages[] = ['role' => 'user', 'content' => $prompt];
 
-        return $this->insertJob($userId, 'ollama.chat', [
+        $parentProject = trim((string) ($request['project'] ?? ''));
+        if ($parentProject !== '' && !self::isValidProjectName($parentProject)) {
+            throw new \DomainException('Parent job has an invalid project name');
+        }
+
+        $continuePayload = [
             'model' => $model,
             'prompt' => $prompt,
             'system_prompt' => $systemPrompt,
             'messages' => $messages,
             'parent_job_id' => (int) $parent['id'],
-        ]);
+        ];
+        if ($parentProject !== '') {
+            $continuePayload['project'] = $parentProject;
+        }
+
+        return $this->insertJob($userId, 'ollama.chat', $continuePayload);
     }
 
     public function cancel(int $userId, int $jobId): ?array

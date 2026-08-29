@@ -24,6 +24,7 @@ use OwnRun\Request;
 use OwnRun\Response;
 use OwnRun\Router;
 use OwnRun\RunnerService;
+use OwnRun\SystemPromptService;
 
 $configPath = dirname(__DIR__) . '/config.php';
 if (!is_file($configPath)) {
@@ -44,6 +45,7 @@ $jobs = new JobService($db);
 $runners = new RunnerService($db);
 $calendar = new CalendarService($db);
 $journal = new JournalService($db);
+$systemPrompts = new SystemPromptService($db);
 $router = new Router();
 
 $runnerTimezone = static function () use ($runners): string {
@@ -154,7 +156,8 @@ $router->add('POST', '/jobs', function () use ($jobs, $requireUser): void {
                 $project,
             );
         } elseif ($type === 'ollama.chat') {
-            $job = $jobs->create($userId, $model, $prompt, $systemPrompt);
+            $project = isset($body['project']) ? trim((string) $body['project']) : null;
+            $job = $jobs->create($userId, $model, $prompt, $systemPrompt, $project);
         } else {
             Response::error('Unsupported job type', 422);
             return;
@@ -431,6 +434,111 @@ $router->add('DELETE', '/journal/{id}', function (array $params) use ($journal, 
 $router->add('POST', '/journal/{id}/delete', function (array $params) use ($journal, $requireUser): void {
     $userId = $requireUser();
     if (!$journal->deleteForUser($userId, (int) $params['id'])) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
+});
+
+// System prompts (web) — register /defaults before /{id}
+$router->add('GET', '/system-prompts', function () use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    Response::json($systemPrompts->bundleForUser($userId));
+});
+
+$router->add('POST', '/system-prompts', function () use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $row = $systemPrompts->createForUser($userId, Request::jsonBody());
+        Response::json($row, 201);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('PUT', '/system-prompts/defaults', function () use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        Response::json($systemPrompts->setGlobalDefaults($userId, Request::jsonBody()));
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('PUT', '/system-prompts/defaults/projects/{project}', function (array $params) use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        Response::json($systemPrompts->setProjectDefaults($userId, (string) $params['project'], Request::jsonBody()));
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('DELETE', '/system-prompts/defaults/projects/{project}', function (array $params) use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        if (!$systemPrompts->deleteProjectDefaults($userId, (string) $params['project'])) {
+            Response::error('Not found', 404);
+            return;
+        }
+        Response::json(['ok' => true, 'project' => (string) $params['project']]);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('GET', '/system-prompts/{id}', function (array $params) use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    $row = $systemPrompts->getForUser($userId, (int) $params['id']);
+    if ($row === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($row);
+});
+
+$router->add('PATCH', '/system-prompts/{id}', function (array $params) use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $row = $systemPrompts->updateForUser($userId, (int) $params['id'], Request::jsonBody());
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($row === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($row);
+});
+
+$router->add('POST', '/system-prompts/{id}', function (array $params) use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $row = $systemPrompts->updateForUser($userId, (int) $params['id'], Request::jsonBody());
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($row === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($row);
+});
+
+$router->add('DELETE', '/system-prompts/{id}', function (array $params) use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    if (!$systemPrompts->deleteForUser($userId, (int) $params['id'])) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
+});
+
+$router->add('POST', '/system-prompts/{id}/delete', function (array $params) use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    if (!$systemPrompts->deleteForUser($userId, (int) $params['id'])) {
         Response::error('Not found', 404);
         return;
     }
