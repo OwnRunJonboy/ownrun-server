@@ -25,6 +25,7 @@ use OwnRun\Response;
 use OwnRun\Router;
 use OwnRun\RunnerService;
 use OwnRun\SystemPromptService;
+use OwnRun\TaskService;
 
 $configPath = dirname(__DIR__) . '/config.php';
 if (!is_file($configPath)) {
@@ -46,6 +47,7 @@ $runners = new RunnerService($db);
 $calendar = new CalendarService($db);
 $journal = new JournalService($db);
 $systemPrompts = new SystemPromptService($db);
+$tasks = new TaskService($db);
 $router = new Router();
 
 $runnerTimezone = static function () use ($runners): string {
@@ -222,7 +224,7 @@ $router->add('POST', '/jobs/{id}/continue', function (array $params) use ($jobs,
 });
 
 // Models / runner status (web)
-$router->add('GET', '/models', function () use ($runners, $calendar, $journal, $requireUser): void {
+$router->add('GET', '/models', function () use ($runners, $calendar, $journal, $tasks, $requireUser): void {
     $userId = $requireUser();
     $status = $runners->status();
     $fromCalendar = $calendar->listProjectsForUser($userId);
@@ -235,6 +237,11 @@ $router->add('GET', '/models', function () use ($runners, $calendar, $journal, $
     sort($mergedJournal, SORT_NATURAL | SORT_FLAG_CASE);
     $status['journal_projects'] = $mergedJournal;
 
+    $fromTasks = $tasks->listProjectsForUser($userId);
+    $mergedTasks = array_values(array_unique(array_merge($status['agent_projects'], $fromTasks)));
+    sort($mergedTasks, SORT_NATURAL | SORT_FLAG_CASE);
+    $status['task_projects'] = $mergedTasks;
+
     Response::json($status);
 });
 
@@ -246,9 +253,9 @@ $notFoundAgent = static function (\RuntimeException $e): bool {
     return false;
 };
 
-$forbiddenAgent = static function (\RuntimeException $e): bool {
+$forbiddenAgent = static function (\RuntimeException $e, string $message = 'Journal writes require a project on this job'): bool {
     if ($e->getMessage() === 'forbidden') {
-        Response::error('Journal writes require a project on this job', 403);
+        Response::error($message, 403);
         return true;
     }
     return false;
@@ -440,6 +447,109 @@ $router->add('POST', '/journal/{id}/delete', function (array $params) use ($jour
     Response::json(['ok' => true, 'id' => (int) $params['id']]);
 });
 
+// Tasks (web) — register /due before /{id}
+$router->add('GET', '/tasks/due', function () use ($tasks, $requireUser, $runnerTimezone): void {
+    $userId = $requireUser();
+    Response::json($tasks->dueForUser($userId, $runnerTimezone()));
+});
+
+$router->add('GET', '/tasks', function () use ($tasks, $requireUser): void {
+    $userId = $requireUser();
+    $projectSpecified = array_key_exists('project', $_GET);
+    $project = $projectSpecified ? (string) $_GET['project'] : null;
+    $status = isset($_GET['status']) ? (string) $_GET['status'] : null;
+    $priority = isset($_GET['priority']) ? (string) $_GET['priority'] : null;
+    $q = isset($_GET['q']) ? (string) $_GET['q'] : null;
+    $dueFrom = isset($_GET['due_from']) ? (string) $_GET['due_from'] : null;
+    $dueTo = isset($_GET['due_to']) ? (string) $_GET['due_to'] : null;
+    $limit = isset($_GET['limit']) ? (int) $_GET['limit'] : TaskService::WEB_LIST_DEFAULT;
+    $offset = isset($_GET['offset']) ? (int) $_GET['offset'] : 0;
+    try {
+        Response::json($tasks->listForUser(
+            $userId,
+            $project,
+            $projectSpecified,
+            $status,
+            $priority,
+            $q,
+            $dueFrom,
+            $dueTo,
+            $limit,
+            $offset,
+        ));
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('GET', '/tasks/{id}', function (array $params) use ($tasks, $requireUser): void {
+    $userId = $requireUser();
+    $task = $tasks->getForUser($userId, (int) $params['id']);
+    if ($task === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($task);
+});
+
+$router->add('POST', '/tasks', function () use ($tasks, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $task = $tasks->createForUser($userId, Request::jsonBody());
+        Response::json($task, 201);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('PATCH', '/tasks/{id}', function (array $params) use ($tasks, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $task = $tasks->updateForUser($userId, (int) $params['id'], Request::jsonBody());
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($task === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($task);
+});
+
+$router->add('POST', '/tasks/{id}', function (array $params) use ($tasks, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $task = $tasks->updateForUser($userId, (int) $params['id'], Request::jsonBody());
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($task === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($task);
+});
+
+$router->add('DELETE', '/tasks/{id}', function (array $params) use ($tasks, $requireUser): void {
+    $userId = $requireUser();
+    if (!$tasks->deleteForUser($userId, (int) $params['id'])) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
+});
+
+$router->add('POST', '/tasks/{id}/delete', function (array $params) use ($tasks, $requireUser): void {
+    $userId = $requireUser();
+    if (!$tasks->deleteForUser($userId, (int) $params['id'])) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
+});
+
 // System prompts (web) — register /defaults before /{id}
 $router->add('GET', '/system-prompts', function () use ($systemPrompts, $requireUser): void {
     $userId = $requireUser();
@@ -465,6 +575,15 @@ $router->add('PUT', '/system-prompts/defaults', function () use ($systemPrompts,
     }
 });
 
+$router->add('POST', '/system-prompts/defaults', function () use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        Response::json($systemPrompts->setGlobalDefaults($userId, Request::jsonBody()));
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
 $router->add('PUT', '/system-prompts/defaults/projects/{project}', function (array $params) use ($systemPrompts, $requireUser): void {
     $userId = $requireUser();
     try {
@@ -474,7 +593,29 @@ $router->add('PUT', '/system-prompts/defaults/projects/{project}', function (arr
     }
 });
 
+$router->add('POST', '/system-prompts/defaults/projects/{project}', function (array $params) use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        Response::json($systemPrompts->setProjectDefaults($userId, (string) $params['project'], Request::jsonBody()));
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
 $router->add('DELETE', '/system-prompts/defaults/projects/{project}', function (array $params) use ($systemPrompts, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        if (!$systemPrompts->deleteProjectDefaults($userId, (string) $params['project'])) {
+            Response::error('Not found', 404);
+            return;
+        }
+        Response::json(['ok' => true, 'project' => (string) $params['project']]);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('POST', '/system-prompts/defaults/projects/{project}/delete', function (array $params) use ($systemPrompts, $requireUser): void {
     $userId = $requireUser();
     try {
         if (!$systemPrompts->deleteProjectDefaults($userId, (string) $params['project'])) {
@@ -901,6 +1042,149 @@ $router->add('POST', '/runner/jobs/{id}/journal/{entryId}/delete', function (arr
     $runnerId = $requireRunner();
     try {
         $ok = $journal->deleteForAgent($runnerId, (int) $params['id'], (int) $params['entryId']);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if (!$ok) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['entryId']]);
+});
+
+// Tasks (runner)
+$router->add('GET', '/runner/jobs/{id}/tasks', function (array $params) use ($tasks, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    $status = isset($_GET['status']) ? (string) $_GET['status'] : null;
+    $priority = isset($_GET['priority']) ? (string) $_GET['priority'] : null;
+    $q = isset($_GET['q']) ? (string) $_GET['q'] : null;
+    $dueFrom = isset($_GET['due_from']) ? (string) $_GET['due_from'] : null;
+    $dueTo = isset($_GET['due_to']) ? (string) $_GET['due_to'] : null;
+    try {
+        Response::json($tasks->listForAgent(
+            $runnerId,
+            (int) $params['id'],
+            $status,
+            $priority,
+            $q,
+            $dueFrom,
+            $dueTo,
+        ));
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+    }
+});
+
+$router->add('GET', '/runner/jobs/{id}/tasks/{entryId}', function (array $params) use ($tasks, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $task = $tasks->getForAgent($runnerId, (int) $params['id'], (int) $params['entryId']);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if ($task === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($task);
+});
+
+$router->add('POST', '/runner/jobs/{id}/tasks', function (array $params) use ($tasks, $requireRunner, $notFoundAgent, $forbiddenAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $task = $tasks->createForAgent($runnerId, (int) $params['id'], Request::jsonBody());
+        Response::json($task, 201);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    } catch (\RuntimeException $e) {
+        if ($forbiddenAgent($e, 'Task writes require a project on this job') || $notFoundAgent($e)) {
+            return;
+        }
+        throw $e;
+    }
+});
+
+$router->add('PATCH', '/runner/jobs/{id}/tasks/{entryId}', function (array $params) use ($tasks, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $task = $tasks->updateForAgent(
+            $runnerId,
+            (int) $params['id'],
+            (int) $params['entryId'],
+            Request::jsonBody(),
+        );
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if ($task === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($task);
+});
+
+$router->add('POST', '/runner/jobs/{id}/tasks/{entryId}', function (array $params) use ($tasks, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $task = $tasks->updateForAgent(
+            $runnerId,
+            (int) $params['id'],
+            (int) $params['entryId'],
+            Request::jsonBody(),
+        );
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if ($task === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($task);
+});
+
+$router->add('DELETE', '/runner/jobs/{id}/tasks/{entryId}', function (array $params) use ($tasks, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $ok = $tasks->deleteForAgent($runnerId, (int) $params['id'], (int) $params['entryId']);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if (!$ok) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['entryId']]);
+});
+
+$router->add('POST', '/runner/jobs/{id}/tasks/{entryId}/delete', function (array $params) use ($tasks, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $ok = $tasks->deleteForAgent($runnerId, (int) $params['id'], (int) $params['entryId']);
     } catch (\RuntimeException $e) {
         if (!$notFoundAgent($e)) {
             throw $e;

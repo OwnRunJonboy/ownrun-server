@@ -2,3 +2,9 @@
 <IfModule mod_setenvif.c>
 SetEnvIf Authorization "^(.+)$" HTTP_AUTHORIZATION=$1
 </IfModule>
+
+# Debian UserDir only allows GET/POST/OPTIONS. Override for this API so
+# PUT/PATCH/DELETE from the SPA (and curl) are not AH01630-denied.
+<IfModule mod_authz_core.c>
+Require method GET POST PUT PATCH DELETE OPTIONS HEAD
+</IfModule>

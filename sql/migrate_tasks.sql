@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS task_entries (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NOT NULL,
+    name VARCHAR(200) NOT NULL,
+    description TEXT NULL,
+    due_date DATE NULL,
+    project VARCHAR(64) NULL,
+    priority ENUM('high', 'normal', 'low') NOT NULL DEFAULT 'normal',
+    status ENUM('todo', 'in_progress', 'finished', 'deleted') NOT NULL DEFAULT 'todo',
+    created_by ENUM('user', 'agent') NOT NULL,
+    created_job_id INT UNSIGNED NULL,
+    updated_job_id INT UNSIGNED NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_user_status_due (user_id, status, due_date, id),
+    INDEX idx_user_project_status_due (user_id, project, status, due_date),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_job_id) REFERENCES jobs(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
