@@ -71,6 +71,7 @@ final class JobService
         ?string $systemPrompt = null,
         ?int $maxToolIterations = null,
         ?string $project = null,
+        ?array $disabledTools = null,
     ): array {
         $allowed = Config::get('agent_profiles', ['workspace', 'web', 'workspace_web']);
         if (!is_array($allowed) || !in_array($profile, $allowed, true)) {
@@ -118,6 +119,9 @@ final class JobService
         ];
         if ($projectName !== '') {
             $payload['project'] = $projectName;
+        }
+        if ($disabledTools !== null && $disabledTools !== []) {
+            $payload['disabled_tools'] = array_values($disabledTools);
         }
 
         return $this->insertJob($userId, 'agent.task', $payload);
@@ -174,6 +178,12 @@ final class JobService
             ];
             if ($parentProject !== '') {
                 $continuePayload['project'] = $parentProject;
+            }
+            $parentDisabled = $request['disabled_tools'] ?? null;
+            if (is_array($parentDisabled) && $parentDisabled !== []) {
+                $continuePayload['disabled_tools'] = array_values(
+                    array_map('strval', $parentDisabled)
+                );
             }
 
             return $this->insertJob($userId, 'agent.task', $continuePayload);

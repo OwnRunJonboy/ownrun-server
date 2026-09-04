@@ -26,6 +26,7 @@ use OwnRun\Router;
 use OwnRun\RunnerService;
 use OwnRun\SystemPromptService;
 use OwnRun\TaskService;
+use OwnRun\ToolPolicyService;
 
 $configPath = dirname(__DIR__) . '/config.php';
 if (!is_file($configPath)) {
@@ -48,6 +49,7 @@ $calendar = new CalendarService($db);
 $journal = new JournalService($db);
 $systemPrompts = new SystemPromptService($db);
 $tasks = new TaskService($db);
+$toolPolicies = new ToolPolicyService($db);
 $router = new Router();
 
 $runnerTimezone = static function () use ($runners): string {
@@ -123,7 +125,7 @@ $router->add('GET', '/jobs', function () use ($jobs, $requireUser): void {
     Response::json(['jobs' => $jobs->listForUser($userId)]);
 });
 
-$router->add('POST', '/jobs', function () use ($jobs, $requireUser): void {
+$router->add('POST', '/jobs', function () use ($jobs, $toolPolicies, $requireUser): void {
     $userId = $requireUser();
     $body = Request::jsonBody();
     $type = trim((string) ($body['type'] ?? 'ollama.chat'));
@@ -148,6 +150,12 @@ $router->add('POST', '/jobs', function () use ($jobs, $requireUser): void {
                 $maxIter = (int) $body['max_tool_iterations'];
             }
             $project = isset($body['project']) ? trim((string) $body['project']) : null;
+            try {
+                $disabledTools = $toolPolicies->parseJobDisabledTools($body);
+            } catch (\InvalidArgumentException $e) {
+                Response::error($e->getMessage(), 422);
+                return;
+            }
             $job = $jobs->createAgent(
                 $userId,
                 $model,
@@ -156,6 +164,7 @@ $router->add('POST', '/jobs', function () use ($jobs, $requireUser): void {
                 $systemPrompt,
                 $maxIter,
                 $project,
+                $disabledTools,
             );
         } elseif ($type === 'ollama.chat') {
             $project = isset($body['project']) ? trim((string) $body['project']) : null;
@@ -224,7 +233,7 @@ $router->add('POST', '/jobs/{id}/continue', function (array $params) use ($jobs,
 });
 
 // Models / runner status (web)
-$router->add('GET', '/models', function () use ($runners, $calendar, $journal, $tasks, $requireUser): void {
+$router->add('GET', '/models', function () use ($runners, $calendar, $journal, $tasks, $toolPolicies, $requireUser): void {
     $userId = $requireUser();
     $status = $runners->status();
     $fromCalendar = $calendar->listProjectsForUser($userId);
@@ -241,6 +250,8 @@ $router->add('GET', '/models', function () use ($runners, $calendar, $journal, $
     $mergedTasks = array_values(array_unique(array_merge($status['agent_projects'], $fromTasks)));
     sort($mergedTasks, SORT_NATURAL | SORT_FLAG_CASE);
     $status['task_projects'] = $mergedTasks;
+
+    $status['project_tool_policies'] = $toolPolicies->listForUser($userId);
 
     Response::json($status);
 });
@@ -686,6 +697,57 @@ $router->add('POST', '/system-prompts/{id}/delete', function (array $params) use
     Response::json(['ok' => true, 'id' => (int) $params['id']]);
 });
 
+// Project tool policies (web)
+$router->add('GET', '/project-tool-policies', function () use ($toolPolicies, $requireUser): void {
+    $userId = $requireUser();
+    Response::json(['policies' => $toolPolicies->listForUser($userId)]);
+});
+
+$router->add('GET', '/project-tool-policies/{project}', function (array $params) use ($toolPolicies, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $row = $toolPolicies->getForUser($userId, (string) $params['project']);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($row === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($row);
+});
+
+$putProjectToolPolicy = function (array $params) use ($toolPolicies, $requireUser): void {
+    $userId = $requireUser();
+    $body = Request::jsonBody();
+    try {
+        $row = $toolPolicies->setForUser($userId, (string) $params['project'], $body);
+        Response::json($row);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+};
+
+$router->add('PUT', '/project-tool-policies/{project}', $putProjectToolPolicy);
+$router->add('POST', '/project-tool-policies/{project}', $putProjectToolPolicy);
+
+$deleteProjectToolPolicy = function (array $params) use ($toolPolicies, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        if (!$toolPolicies->deleteForUser($userId, (string) $params['project'])) {
+            Response::error('Not found', 404);
+            return;
+        }
+        Response::json(['ok' => true, 'project' => (string) $params['project']]);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+};
+
+$router->add('DELETE', '/project-tool-policies/{project}', $deleteProjectToolPolicy);
+$router->add('POST', '/project-tool-policies/{project}/delete', $deleteProjectToolPolicy);
+
 // Runner endpoints
 $router->add('POST', '/runner/heartbeat', function () use ($runners, $requireRunner): void {
     $runnerId = $requireRunner();
@@ -710,7 +772,24 @@ $router->add('POST', '/runner/heartbeat', function () use ($runners, $requireRun
     if (isset($body['timezone']) && is_string($body['timezone'])) {
         $timezone = $body['timezone'];
     }
-    $runners->heartbeat($runnerId, $models, $agentProfiles, $agentModels, $agentProjects, $timezone);
+    $ollamaWebSearch = null;
+    if (array_key_exists('ollama_web_search', $body)) {
+        $ollamaWebSearch = (bool) $body['ollama_web_search'];
+    }
+    $agentToolIds = null;
+    if (isset($body['agent_tool_ids']) && is_array($body['agent_tool_ids'])) {
+        $agentToolIds = array_map('strval', $body['agent_tool_ids']);
+    }
+    $runners->heartbeat(
+        $runnerId,
+        $models,
+        $agentProfiles,
+        $agentModels,
+        $agentProjects,
+        $timezone,
+        $ollamaWebSearch,
+        $agentToolIds,
+    );
     Response::json(['ok' => true]);
 });
 
@@ -732,6 +811,20 @@ $router->add('POST', '/runner/jobs/{id}/heartbeat', function (array $params) use
         return;
     }
     Response::json(['ok' => true, 'cancel_requested' => (bool) $result['cancel_requested']]);
+});
+
+$router->add('GET', '/runner/jobs/{id}/tool-policy', function (array $params) use ($toolPolicies, $requireRunner): void {
+    $runnerId = $requireRunner();
+    try {
+        $disabled = $toolPolicies->disabledForRunningJob($runnerId, (int) $params['id']);
+        Response::json(['disabled_tools' => $disabled]);
+    } catch (\RuntimeException $e) {
+        if ($e->getMessage() === 'not_found') {
+            Response::error('Not found', 404);
+            return;
+        }
+        throw $e;
+    }
 });
 
 $router->add('POST', '/runner/jobs/{id}/progress', function (array $params) use ($jobs, $requireRunner): void {

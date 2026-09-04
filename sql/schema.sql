@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS runners (
     agent_models JSON NULL,
     agent_projects JSON NULL,
     timezone VARCHAR(64) NULL,
+    ollama_web_search TINYINT(1) NULL,
+    agent_tool_ids JSON NULL,
     UNIQUE KEY uk_name (name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -152,4 +154,13 @@ CREATE TABLE IF NOT EXISTS project_prompt_defaults (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (chat_prompt_id) REFERENCES system_prompts(id) ON DELETE SET NULL,
     FOREIGN KEY (agent_prompt_id) REFERENCES system_prompts(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS project_tool_policies (
+    user_id INT UNSIGNED NOT NULL,
+    project VARCHAR(64) NOT NULL,
+    disabled_tools JSON NOT NULL,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id, project),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
