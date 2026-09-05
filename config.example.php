@@ -44,5 +44,13 @@ return [
         'task_add',
         'task_edit',
         'task_delete',
+        'kb_list',
+        'kb_search',
+        'kb_get',
     ],
+    'kb_storage_path' => __DIR__ . '/storage/kb',
+    'kb_embed_model' => 'nomic-embed-text',
+    'max_kb_upload_bytes' => 32 * 1024 * 1024,
+    'max_kb_bases' => 50,
+    'max_kb_documents_per_base' => 200,
 ];

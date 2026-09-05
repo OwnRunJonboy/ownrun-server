@@ -1,0 +1,40 @@
+CREATE TABLE IF NOT EXISTS kb_bases (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NOT NULL,
+    name VARCHAR(80) NOT NULL,
+    slug VARCHAR(64) NOT NULL,
+    project VARCHAR(64) NULL,
+    description VARCHAR(500) NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_user_slug (user_id, slug),
+    INDEX idx_user_project (user_id, project),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS kb_documents (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    kb_id INT UNSIGNED NOT NULL,
+    user_id INT UNSIGNED NOT NULL,
+    filename VARCHAR(255) NOT NULL,
+    content_type VARCHAR(128) NOT NULL,
+    format ENUM('pdf', 'docx', 'epub') NOT NULL,
+    size_bytes INT UNSIGNED NOT NULL,
+    storage_path VARCHAR(512) NOT NULL,
+    status ENUM('pending', 'queued', 'running', 'ready', 'failed', 'deleting') NOT NULL DEFAULT 'pending',
+    error_message TEXT NULL,
+    chunk_count INT UNSIGNED NULL,
+    page_count INT UNSIGNED NULL,
+    chapter_count INT UNSIGNED NULL,
+    content_hash CHAR(64) NOT NULL,
+    ingest_job_id INT UNSIGNED NULL,
+    embedding_model VARCHAR(128) NULL,
+    deleted_at DATETIME NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_kb_status (kb_id, status),
+    INDEX idx_user_status (user_id, status),
+    FOREIGN KEY (kb_id) REFERENCES kb_bases(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (ingest_job_id) REFERENCES jobs(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -369,6 +369,34 @@ final class JobService
      * } $fields
      * @return array<string, mixed>
      */
+    /**
+     * Insert a queued job with an arbitrary JSON request payload (e.g. kb.ingest).
+     *
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    public function createTyped(int $userId, string $type, array $payload): array
+    {
+        $encoded = json_encode($payload);
+        $maxBytes = (int) Config::get('max_request_payload_bytes', 65536);
+        if ($encoded === false || strlen($encoded) > $maxBytes) {
+            throw new \InvalidArgumentException('Request payload too large');
+        }
+
+        $stmt = $this->db->prepare(
+            'INSERT INTO jobs (user_id, type, status, request_payload, queued_at)
+             VALUES (?, ?, ?, ?, NOW())'
+        );
+        $stmt->execute([$userId, $type, 'queued', $encoded]);
+        $id = (int) $this->db->lastInsertId();
+
+        $job = $this->getForUser($userId, $id);
+        if ($job === null) {
+            throw new \RuntimeException('Failed to create job');
+        }
+        return $job;
+    }
+
     private function insertJob(int $userId, string $type, array $fields): array
     {
         $payload = [
@@ -394,25 +422,11 @@ final class JobService
         if (isset($fields['max_tool_iterations'])) {
             $payload['max_tool_iterations'] = $fields['max_tool_iterations'];
         }
-
-        $encoded = json_encode($payload);
-        $maxBytes = (int) Config::get('max_request_payload_bytes', 65536);
-        if ($encoded === false || strlen($encoded) > $maxBytes) {
-            throw new \InvalidArgumentException('Request payload too large');
+        if (isset($fields['disabled_tools']) && is_array($fields['disabled_tools'])) {
+            $payload['disabled_tools'] = array_values($fields['disabled_tools']);
         }
 
-        $stmt = $this->db->prepare(
-            'INSERT INTO jobs (user_id, type, status, request_payload, queued_at)
-             VALUES (?, ?, ?, ?, NOW())'
-        );
-        $stmt->execute([$userId, $type, 'queued', $encoded]);
-        $id = (int) $this->db->lastInsertId();
-
-        $job = $this->getForUser($userId, $id);
-        if ($job === null) {
-            throw new \RuntimeException('Failed to create job');
-        }
-        return $job;
+        return $this->createTyped($userId, $type, $payload);
     }
 
     /** @param array<string, mixed> $result */

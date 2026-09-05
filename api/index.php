@@ -20,6 +20,7 @@ use OwnRun\Config;
 use OwnRun\Database;
 use OwnRun\JobService;
 use OwnRun\JournalService;
+use OwnRun\KnowledgeBaseService;
 use OwnRun\Request;
 use OwnRun\Response;
 use OwnRun\Router;
@@ -50,6 +51,7 @@ $journal = new JournalService($db);
 $systemPrompts = new SystemPromptService($db);
 $tasks = new TaskService($db);
 $toolPolicies = new ToolPolicyService($db);
+$kb = new KnowledgeBaseService($db, $jobs);
 $router = new Router();
 
 $runnerTimezone = static function () use ($runners): string {
@@ -233,7 +235,7 @@ $router->add('POST', '/jobs/{id}/continue', function (array $params) use ($jobs,
 });
 
 // Models / runner status (web)
-$router->add('GET', '/models', function () use ($runners, $calendar, $journal, $tasks, $toolPolicies, $requireUser): void {
+$router->add('GET', '/models', function () use ($runners, $calendar, $journal, $tasks, $kb, $toolPolicies, $requireUser): void {
     $userId = $requireUser();
     $status = $runners->status();
     $fromCalendar = $calendar->listProjectsForUser($userId);
@@ -250,6 +252,11 @@ $router->add('GET', '/models', function () use ($runners, $calendar, $journal, $
     $mergedTasks = array_values(array_unique(array_merge($status['agent_projects'], $fromTasks)));
     sort($mergedTasks, SORT_NATURAL | SORT_FLAG_CASE);
     $status['task_projects'] = $mergedTasks;
+
+    $fromKb = $kb->listProjectsForUser($userId);
+    $mergedKb = array_values(array_unique(array_merge($status['agent_projects'], $fromKb)));
+    sort($mergedKb, SORT_NATURAL | SORT_FLAG_CASE);
+    $status['kb_projects'] = $mergedKb;
 
     $status['project_tool_policies'] = $toolPolicies->listForUser($userId);
 
@@ -1289,6 +1296,279 @@ $router->add('POST', '/runner/jobs/{id}/tasks/{entryId}/delete', function (array
         return;
     }
     Response::json(['ok' => true, 'id' => (int) $params['entryId']]);
+});
+
+// Knowledge bases (web)
+$router->add('GET', '/kb', function () use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    $projectSpecified = array_key_exists('project', $_GET);
+    $project = $projectSpecified ? (string) $_GET['project'] : null;
+    try {
+        Response::json(['bases' => $kb->listBasesForUser($userId, $project, $projectSpecified)]);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('POST', '/kb', function () use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $base = $kb->createBaseForUser($userId, Request::jsonBody());
+        Response::json($base, 201);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    }
+});
+
+$router->add('GET', '/kb/{id}', function (array $params) use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    $base = $kb->getBaseForUser($userId, (int) $params['id']);
+    if ($base === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($base);
+});
+
+$router->add('PATCH', '/kb/{id}', function (array $params) use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $base = $kb->updateBaseForUser($userId, (int) $params['id'], Request::jsonBody());
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($base === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($base);
+});
+
+$router->add('POST', '/kb/{id}', function (array $params) use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $base = $kb->updateBaseForUser($userId, (int) $params['id'], Request::jsonBody());
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($base === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($base);
+});
+
+$router->add('DELETE', '/kb/{id}', function (array $params) use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    if (!$kb->deleteBaseForUser($userId, (int) $params['id'])) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
+});
+
+$router->add('POST', '/kb/{id}/delete', function (array $params) use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    if (!$kb->deleteBaseForUser($userId, (int) $params['id'])) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
+});
+
+$router->add('POST', '/kb/{id}/rebuild', function (array $params) use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $result = $kb->rebuildBaseForUser($userId, (int) $params['id']);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($result === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($result);
+});
+
+$router->add('GET', '/kb/{id}/documents', function (array $params) use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    $docs = $kb->listDocumentsForUser($userId, (int) $params['id']);
+    if ($docs === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['documents' => $docs]);
+});
+
+$router->add('POST', '/kb/{id}/documents', function (array $params) use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    $file = $_FILES['file'] ?? null;
+    if (!is_array($file)) {
+        // Empty $_FILES usually means the whole body exceeded post_max_size.
+        $postMax = (string) ini_get('post_max_size');
+        $contentLength = (int) ($_SERVER['CONTENT_LENGTH'] ?? 0);
+        if ($contentLength > 0) {
+            Response::error(
+                "Upload missing: request was {$contentLength} bytes but PHP post_max_size is {$postMax}. "
+                . 'Increase post_max_size / upload_max_filesize for the API.',
+                422
+            );
+            return;
+        }
+        Response::error('Multipart field "file" is required', 422);
+        return;
+    }
+    try {
+        $doc = $kb->uploadDocumentForUser($userId, (int) $params['id'], $file);
+        Response::json($doc, 201);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    } catch (\RuntimeException $e) {
+        if ($e->getMessage() === 'not_found') {
+            Response::error('Not found', 404);
+            return;
+        }
+        throw $e;
+    }
+});
+
+$router->add('POST', '/kb/documents/{id}/reingest', function (array $params) use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    try {
+        $doc = $kb->reingestDocumentForUser($userId, (int) $params['id']);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    }
+    if ($doc === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($doc);
+});
+
+$router->add('DELETE', '/kb/documents/{id}', function (array $params) use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    if (!$kb->deleteDocumentForUser($userId, (int) $params['id'])) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
+});
+
+$router->add('POST', '/kb/documents/{id}/delete', function (array $params) use ($kb, $requireUser): void {
+    $userId = $requireUser();
+    if (!$kb->deleteDocumentForUser($userId, (int) $params['id'])) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
+});
+
+// Knowledge bases (runner)
+$router->add('GET', '/runner/kb/documents/{id}/content', function (array $params) use ($kb, $requireRunner): void {
+    $runnerId = $requireRunner();
+    try {
+        $info = $kb->documentContentForRunner($runnerId, (int) $params['id']);
+    } catch (\RuntimeException $e) {
+        $msg = $e->getMessage();
+        if ($msg === 'not_found') {
+            Response::error('Not found', 404);
+            return;
+        }
+        if (str_starts_with($msg, 'blob_missing')) {
+            Response::error($msg, 404);
+            return;
+        }
+        throw $e;
+    }
+    if ($info === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::file($info['path'], $info['content_type'], $info['filename']);
+});
+
+$router->add('POST', '/runner/kb/documents/{id}/status', function (array $params) use ($kb, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $doc = $kb->updateDocumentStatusForRunner($runnerId, (int) $params['id'], Request::jsonBody());
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+        return;
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if ($doc === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($doc);
+});
+
+$router->add('POST', '/runner/kb/documents/{id}/purge', function (array $params) use ($kb, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $ok = $kb->finalizeDocumentPurgeForRunner($runnerId, (int) $params['id']);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if (!$ok) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id']]);
+});
+
+$router->add('POST', '/runner/kb/{id}/purge', function (array $params) use ($kb, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $ok = $kb->finalizeBasePurgeForRunner($runnerId, (int) $params['id']);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    Response::json(['ok' => true, 'id' => (int) $params['id'], 'deleted' => $ok]);
+});
+
+$router->add('GET', '/runner/jobs/{id}/kb', function (array $params) use ($kb, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    $filter = isset($_GET['kb']) ? (string) $_GET['kb'] : null;
+    try {
+        Response::json($kb->visibleForAgent($runnerId, (int) $params['id'], $filter));
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+    }
+});
+
+$router->add('GET', '/runner/jobs/{id}/kb/documents/{docId}', function (array $params) use ($kb, $requireRunner, $notFoundAgent): void {
+    $runnerId = $requireRunner();
+    try {
+        $doc = $kb->getDocumentForAgent($runnerId, (int) $params['id'], (int) $params['docId']);
+    } catch (\RuntimeException $e) {
+        if (!$notFoundAgent($e)) {
+            throw $e;
+        }
+        return;
+    }
+    if ($doc === null) {
+        Response::error('Not found', 404);
+        return;
+    }
+    Response::json($doc);
 });
 
 try {

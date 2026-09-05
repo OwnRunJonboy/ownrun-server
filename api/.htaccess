@@ -8,3 +8,7 @@ SetEnvIf Authorization "^(.+)$" HTTP_AUTHORIZATION=$1
 <IfModule mod_authz_core.c>
 Require method GET POST PUT PATCH DELETE OPTIONS HEAD
 </IfModule>
+
+# Note: UserDir AllowOverride does not include Options, so php_value here is
+# ignored / can 500. Raise upload_max_filesize in /etc/php/*/apache2/php.ini
+# (see DEPLOYMENT.md). api/.user.ini applies only under CGI/FPM.

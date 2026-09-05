@@ -33,6 +33,9 @@ final class ToolPolicyService
         'task_add',
         'task_edit',
         'task_delete',
+        'kb_list',
+        'kb_search',
+        'kb_get',
     ];
 
     public function __construct(private PDO $db) {}
