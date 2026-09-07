@@ -8,6 +8,7 @@ declare(strict_types=1);
  *
  * Usage:
  *   php scripts/setup.php --username=admin --password=secret
+ *   php scripts/setup.php --username=admin --password=secret --runner-token=HEX --update-password
  */
 
 if (php_sapi_name() !== 'cli') {
@@ -23,13 +24,26 @@ if (!is_file($configPath)) {
 
 $config = require $configPath;
 
-$options = getopt('', ['username:', 'password:', 'runner-name::']);
+$options = getopt('', [
+    'username:',
+    'password:',
+    'runner-name::',
+    'runner-token::',
+    'update-password',
+]);
 $username = $options['username'] ?? null;
 $password = $options['password'] ?? null;
 $runnerName = $options['runner-name'] ?? 'home';
+$runnerTokenOpt = $options['runner-token'] ?? null;
+$updatePassword = array_key_exists('update-password', $options);
 
 if (!$username || !$password) {
-    fwrite(STDERR, "Usage: php scripts/setup.php --username=USER --password=PASS [--runner-name=home]\n");
+    fwrite(STDERR, "Usage: php scripts/setup.php --username=USER --password=PASS [--runner-name=home] [--runner-token=TOKEN] [--update-password]\n");
+    exit(1);
+}
+
+if (is_string($runnerTokenOpt) && strlen($runnerTokenOpt) < 16) {
+    fwrite(STDERR, "--runner-token must be at least 16 characters.\n");
     exit(1);
 }
 
@@ -70,13 +84,21 @@ try {
     echo "User created: {$username}\n";
 } catch (PDOException $e) {
     if (str_contains($e->getMessage(), 'Duplicate')) {
-        echo "User already exists: {$username}\n";
+        if ($updatePassword) {
+            $upd = $pdo->prepare('UPDATE users SET password_hash = ? WHERE username = ?');
+            $upd->execute([$hash, $username]);
+            echo "User password updated: {$username}\n";
+        } else {
+            echo "User already exists: {$username}\n";
+        }
     } else {
         throw $e;
     }
 }
 
-$runnerToken = bin2hex(random_bytes(32));
+$runnerToken = is_string($runnerTokenOpt) && $runnerTokenOpt !== ''
+    ? $runnerTokenOpt
+    : bin2hex(random_bytes(32));
 $runnerHash = hash('sha256', $runnerToken);
 $stmt = $pdo->prepare('INSERT INTO runners (name, token_hash) VALUES (?, ?)');
 try {
@@ -85,8 +107,14 @@ try {
     echo "Runner token (save this — shown once):\n{$runnerToken}\n";
 } catch (PDOException $e) {
     if (str_contains($e->getMessage(), 'Duplicate')) {
-        echo "Runner already exists: {$runnerName}\n";
-        echo "Generate a new token manually if needed.\n";
+        if (is_string($runnerTokenOpt) && $runnerTokenOpt !== '') {
+            $upd = $pdo->prepare('UPDATE runners SET token_hash = ? WHERE name = ?');
+            $upd->execute([$runnerHash, $runnerName]);
+            echo "Runner token updated: {$runnerName}\n";
+        } else {
+            echo "Runner already exists: {$runnerName}\n";
+            echo "Generate a new token manually if needed.\n";
+        }
     } else {
         throw $e;
     }

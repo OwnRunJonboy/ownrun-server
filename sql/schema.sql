@@ -4,13 +4,27 @@ CREATE TABLE IF NOT EXISTS users (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(64) NOT NULL UNIQUE,
     password_hash VARCHAR(255) NOT NULL,
+    failed_login_count INT UNSIGNED NOT NULL DEFAULT 0,
+    locked_until DATETIME NULL,
+    token_version INT UNSIGNED NOT NULL DEFAULT 1,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(64) NOT NULL,
+    ip VARCHAR(45) NOT NULL,
+    succeeded TINYINT(1) NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_username_created (username, created_at),
+    INDEX idx_ip_created (ip, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS refresh_tokens (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     user_id INT UNSIGNED NOT NULL,
     token_hash CHAR(64) NOT NULL,
+    family_id CHAR(64) NOT NULL,
     expires_at DATETIME NOT NULL,
     remember_me TINYINT(1) NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -18,6 +32,7 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     revoked_at DATETIME NULL,
     INDEX idx_token_hash (token_hash),
     INDEX idx_user_id (user_id),
+    INDEX idx_family_id (family_id),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -34,6 +49,10 @@ CREATE TABLE IF NOT EXISTS runners (
     timezone VARCHAR(64) NULL,
     ollama_web_search TINYINT(1) NULL,
     agent_tool_ids JSON NULL,
+    backend_state VARCHAR(32) NULL,
+    sd_available TINYINT(1) NULL,
+    sd_models JSON NULL,
+    ollama_models_stale TINYINT(1) NULL,
     UNIQUE KEY uk_name (name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -204,4 +223,17 @@ CREATE TABLE IF NOT EXISTS kb_documents (
     FOREIGN KEY (kb_id) REFERENCES kb_bases(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (ingest_job_id) REFERENCES jobs(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS job_artifacts (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    job_id INT UNSIGNED NOT NULL,
+    kind VARCHAR(32) NOT NULL DEFAULT 'output',
+    filename VARCHAR(255) NOT NULL,
+    content_type VARCHAR(128) NOT NULL,
+    storage_path VARCHAR(512) NOT NULL,
+    size_bytes INT UNSIGNED NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_job (job_id),
+    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

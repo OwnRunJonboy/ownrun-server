@@ -12,9 +12,14 @@ return [
         'charset' => 'utf8mb4',
     ],
     'jwt_secret' => 'change-me-to-a-long-random-string',
-    'access_jwt_ttl' => 7 * 24 * 3600,       // 7 days
-    'refresh_ttl' => 30 * 24 * 3600,         // 30 days
-    'remember_me_ttl' => 365 * 24 * 3600,    // 1 year
+    'login_attempt_window' => 15 * 60,       // rolling window for IP/username caps
+    'login_max_attempts_per_ip' => 20,
+    'login_max_attempts_per_username' => 5,  // also the lockout threshold
+    'login_lockout_base' => 5 * 60,          // first lockout; doubles each extra failure
+    'login_lockout_cap' => 60 * 60,
+    'access_jwt_ttl' => 15 * 60,             // 15 minutes; revocable via users.token_version
+    'refresh_ttl' => 7 * 24 * 3600,          // 7 days (sessionStorage; ends when the tab/browser closes)
+    'remember_me_ttl' => 30 * 24 * 3600,     // 30 days (refresh token only in localStorage)
     'job_lease_timeout' => 60 * 60,          // 60 minutes
     'runner_online_window' => 60,            // seconds
     'max_request_payload_bytes' => 65536,
@@ -53,4 +58,10 @@ return [
     'max_kb_upload_bytes' => 32 * 1024 * 1024,
     'max_kb_bases' => 50,
     'max_kb_documents_per_base' => 200,
+    'artifacts_storage_path' => __DIR__ . '/storage/artifacts',
+    'max_artifact_bytes' => 15 * 1024 * 1024,
+    'max_artifacts_per_job' => 4,
+    'sd_max_dimension' => 1024,
+    'sd_max_steps' => 50,
+    'sd_max_batch_size' => 4,
 ];

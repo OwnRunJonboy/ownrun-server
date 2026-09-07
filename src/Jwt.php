@@ -24,6 +24,11 @@ final class Jwt
         }
 
         [$headerB64, $payloadB64, $signatureB64] = $parts;
+        $header = json_decode(self::base64UrlDecode($headerB64), true);
+        if (!is_array($header) || ($header['alg'] ?? '') !== 'HS256') {
+            return null;
+        }
+
         $expected = self::base64UrlEncode(
             hash_hmac('sha256', $headerB64 . '.' . $payloadB64, $secret, true)
         );

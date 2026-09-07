@@ -15,6 +15,8 @@ spl_autoload_register(function (string $class): void {
 });
 
 use OwnRun\AuthService;
+use OwnRun\ArtifactService;
+use OwnRun\LoginThrottledException;
 use OwnRun\CalendarService;
 use OwnRun\Config;
 use OwnRun\Database;
@@ -46,6 +48,7 @@ try {
 $auth = new AuthService($db);
 $jobs = new JobService($db);
 $runners = new RunnerService($db);
+$artifacts = new ArtifactService($db);
 $calendar = new CalendarService($db);
 $journal = new JournalService($db);
 $systemPrompts = new SystemPromptService($db);
@@ -76,6 +79,11 @@ $requireRunner = function () use ($auth): int {
     return $runnerId;
 };
 
+$router->add('GET', '/health', function () use ($db): void {
+    $db->query('SELECT 1');
+    Response::json(['ok' => true]);
+});
+
 // Auth
 $router->add('POST', '/auth/login', function () use ($auth): void {
     $body = Request::jsonBody();
@@ -88,7 +96,13 @@ $router->add('POST', '/auth/login', function () use ($auth): void {
         return;
     }
 
-    $tokens = $auth->login($username, $password, $rememberMe);
+    try {
+        $tokens = $auth->login($username, $password, $rememberMe, Request::clientIp());
+    } catch (LoginThrottledException $e) {
+        header('Retry-After: ' . (string) $e->retryAfterSeconds);
+        Response::error($e->getMessage(), 429, ['retry_after' => $e->retryAfterSeconds]);
+        return;
+    }
     if ($tokens === null) {
         Response::error('Invalid credentials', 401);
         return;
@@ -131,16 +145,23 @@ $router->add('POST', '/jobs', function () use ($jobs, $toolPolicies, $requireUse
     $userId = $requireUser();
     $body = Request::jsonBody();
     $type = trim((string) ($body['type'] ?? 'ollama.chat'));
-    $model = trim((string) ($body['model'] ?? ''));
-    $prompt = trim((string) ($body['prompt'] ?? ''));
-    $systemPrompt = isset($body['system_prompt']) ? trim((string) $body['system_prompt']) : null;
-
-    if ($model === '' || $prompt === '') {
-        Response::error('Model and prompt are required', 422);
-        return;
-    }
 
     try {
+        if ($type === 'stablediffusion.txt2img') {
+            $job = $jobs->createTxt2Img($userId, $body);
+            Response::json($job, 201);
+            return;
+        }
+
+        $model = trim((string) ($body['model'] ?? ''));
+        $prompt = trim((string) ($body['prompt'] ?? ''));
+        $systemPrompt = isset($body['system_prompt']) ? trim((string) $body['system_prompt']) : null;
+
+        if ($model === '' || $prompt === '') {
+            Response::error('Model and prompt are required', 422);
+            return;
+        }
+
         if ($type === 'agent.task') {
             $profile = trim((string) ($body['profile'] ?? ''));
             if ($profile === '') {
@@ -158,6 +179,10 @@ $router->add('POST', '/jobs', function () use ($jobs, $toolPolicies, $requireUse
                 Response::error($e->getMessage(), 422);
                 return;
             }
+            $allowHttpFetch = false;
+            if (array_key_exists('allow_http_fetch', $body)) {
+                $allowHttpFetch = (bool) $body['allow_http_fetch'];
+            }
             $job = $jobs->createAgent(
                 $userId,
                 $model,
@@ -167,6 +192,7 @@ $router->add('POST', '/jobs', function () use ($jobs, $toolPolicies, $requireUse
                 $maxIter,
                 $project,
                 $disabledTools,
+                $allowHttpFetch,
             );
         } elseif ($type === 'ollama.chat') {
             $project = isset($body['project']) ? trim((string) $body['project']) : null;
@@ -189,6 +215,35 @@ $router->add('GET', '/jobs/{id}', function (array $params) use ($jobs, $requireU
         return;
     }
     Response::json($job);
+});
+
+$router->add('GET', '/jobs/{id}/artifacts', function (array $params) use ($artifacts, $jobs, $requireUser): void {
+    $userId = $requireUser();
+    $jobId = (int) $params['id'];
+    if ($jobs->getForUser($userId, $jobId) === null) {
+        Response::error('Job not found', 404);
+        return;
+    }
+    Response::json(['artifacts' => $artifacts->listForUser($userId, $jobId)]);
+});
+
+$router->add('GET', '/jobs/{id}/artifacts/{artifactId}', function (array $params) use ($artifacts, $requireUser): void {
+    $userId = $requireUser();
+    $file = $artifacts->absoluteFileForUser(
+        $userId,
+        (int) $params['id'],
+        (int) $params['artifactId']
+    );
+    if ($file === null) {
+        Response::error('Artifact not found', 404);
+        return;
+    }
+    $download = isset($_GET['download']) && (string) $_GET['download'] !== '0';
+    Response::file(
+        $file['path'],
+        $file['content_type'],
+        $download ? $file['filename'] : null
+    );
 });
 
 $router->add('POST', '/jobs/{id}/cancel', function (array $params) use ($jobs, $requireUser): void {
@@ -787,6 +842,22 @@ $router->add('POST', '/runner/heartbeat', function () use ($runners, $requireRun
     if (isset($body['agent_tool_ids']) && is_array($body['agent_tool_ids'])) {
         $agentToolIds = array_map('strval', $body['agent_tool_ids']);
     }
+    $backendState = null;
+    if (isset($body['backend_state']) && is_string($body['backend_state'])) {
+        $backendState = $body['backend_state'];
+    }
+    $sdAvailable = null;
+    if (array_key_exists('sd_available', $body)) {
+        $sdAvailable = (bool) $body['sd_available'];
+    }
+    $sdModels = null;
+    if (isset($body['sd_models']) && is_array($body['sd_models'])) {
+        $sdModels = array_map('strval', $body['sd_models']);
+    }
+    $ollamaModelsStale = null;
+    if (array_key_exists('ollama_models_stale', $body)) {
+        $ollamaModelsStale = (bool) $body['ollama_models_stale'];
+    }
     $runners->heartbeat(
         $runnerId,
         $models,
@@ -796,6 +867,10 @@ $router->add('POST', '/runner/heartbeat', function () use ($runners, $requireRun
         $timezone,
         $ollamaWebSearch,
         $agentToolIds,
+        $backendState,
+        $sdAvailable,
+        $sdModels,
+        $ollamaModelsStale,
     );
     Response::json(['ok' => true]);
 });
@@ -887,6 +962,27 @@ $router->add('POST', '/runner/jobs/{id}/fail', function (array $params) use ($jo
         return;
     }
     Response::json(['ok' => true]);
+});
+
+$router->add('POST', '/runner/jobs/{id}/artifacts', function (array $params) use ($artifacts, $requireRunner): void {
+    $runnerId = $requireRunner();
+    $file = $_FILES['file'] ?? null;
+    if (!is_array($file)) {
+        Response::error('Multipart file field "file" is required', 422);
+        return;
+    }
+    try {
+        $artifact = $artifacts->uploadForRunner($runnerId, (int) $params['id'], $file);
+        Response::json(['artifact' => $artifact], 201);
+    } catch (\InvalidArgumentException $e) {
+        Response::error($e->getMessage(), 422);
+    } catch (\RuntimeException $e) {
+        if ($e->getMessage() === 'not_found') {
+            Response::error('Job not found or not running on this runner', 404);
+            return;
+        }
+        Response::error($e->getMessage(), 500);
+    }
 });
 
 $router->add('GET', '/runner/jobs/{id}/calendar', function (array $params) use ($calendar, $requireRunner, $notFoundAgent): void {

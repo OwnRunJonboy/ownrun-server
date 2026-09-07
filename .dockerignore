@@ -1,0 +1,6 @@
+.git
+.gitignore
+config.php
+storage
+*.log
+*.md

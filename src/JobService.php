@@ -63,6 +63,79 @@ final class JobService
         return $this->insertJob($userId, 'ollama.chat', $payload);
     }
 
+    /**
+     * @return array<string, mixed>
+     */
+    public function createTxt2Img(int $userId, array $body): array
+    {
+        $prompt = trim((string) ($body['prompt'] ?? ''));
+        if ($prompt === '') {
+            throw new \InvalidArgumentException('Prompt is required');
+        }
+        if (strlen($prompt) > 2048) {
+            throw new \InvalidArgumentException('Prompt must be at most 2048 characters');
+        }
+
+        $negative = isset($body['negative_prompt'])
+            ? trim((string) $body['negative_prompt'])
+            : '';
+        if (strlen($negative) > 2048) {
+            throw new \InvalidArgumentException('Negative prompt must be at most 2048 characters');
+        }
+
+        $maxDim = (int) Config::get('sd_max_dimension', 1024);
+        $width = isset($body['width']) ? (int) $body['width'] : 1024;
+        $height = isset($body['height']) ? (int) $body['height'] : 1024;
+        if ($width < 64 || $height < 64 || $width > $maxDim || $height > $maxDim) {
+            throw new \InvalidArgumentException(
+                "Width and height must be between 64 and {$maxDim}"
+            );
+        }
+        if ($width % 8 !== 0 || $height % 8 !== 0) {
+            throw new \InvalidArgumentException('Width and height must be multiples of 8');
+        }
+
+        $maxSteps = (int) Config::get('sd_max_steps', 50);
+        $steps = isset($body['steps']) ? (int) $body['steps'] : 30;
+        if ($steps < 1 || $steps > $maxSteps) {
+            throw new \InvalidArgumentException("Steps must be between 1 and {$maxSteps}");
+        }
+
+        $maxBatch = (int) Config::get('sd_max_batch_size', 4);
+        $batchSize = isset($body['batch_size']) ? (int) $body['batch_size'] : 1;
+        if ($batchSize < 1 || $batchSize > $maxBatch) {
+            throw new \InvalidArgumentException("Batch size must be between 1 and {$maxBatch}");
+        }
+
+        $cfgScale = isset($body['cfg_scale']) ? (float) $body['cfg_scale'] : 7.0;
+        if ($cfgScale < 1.0 || $cfgScale > 30.0) {
+            throw new \InvalidArgumentException('CFG scale must be between 1 and 30');
+        }
+
+        $seed = array_key_exists('seed', $body) ? (int) $body['seed'] : -1;
+
+        $model = isset($body['model']) ? trim((string) $body['model']) : '';
+        if (strlen($model) > 255) {
+            throw new \InvalidArgumentException('Model name is too long');
+        }
+
+        $payload = [
+            'prompt' => $prompt,
+            'negative_prompt' => $negative,
+            'width' => $width,
+            'height' => $height,
+            'steps' => $steps,
+            'cfg_scale' => $cfgScale,
+            'seed' => $seed,
+            'batch_size' => $batchSize,
+        ];
+        if ($model !== '') {
+            $payload['model'] = $model;
+        }
+
+        return $this->createTyped($userId, 'stablediffusion.txt2img', $payload);
+    }
+
     public function createAgent(
         int $userId,
         string $model,
@@ -72,6 +145,7 @@ final class JobService
         ?int $maxToolIterations = null,
         ?string $project = null,
         ?array $disabledTools = null,
+        bool $allowHttpFetch = false,
     ): array {
         $allowed = Config::get('agent_profiles', ['workspace', 'web', 'workspace_web']);
         if (!is_array($allowed) || !in_array($profile, $allowed, true)) {
@@ -116,6 +190,7 @@ final class JobService
             'system_prompt' => $systemPrompt,
             'profile' => $profile,
             'max_tool_iterations' => $iterations,
+            'allow_http_fetch' => $allowHttpFetch,
         ];
         if ($projectName !== '') {
             $payload['project'] = $projectName;
@@ -144,6 +219,9 @@ final class JobService
         }
 
         $type = (string) ($parent['type'] ?? 'ollama.chat');
+        if ($type === 'stablediffusion.txt2img') {
+            throw new \DomainException('Image jobs cannot be continued');
+        }
         $systemPrompt = isset($request['system_prompt']) ? trim((string) $request['system_prompt']) : null;
 
         if ($type === 'agent.task') {
@@ -185,6 +263,7 @@ final class JobService
                     array_map('strval', $parentDisabled)
                 );
             }
+            $continuePayload['allow_http_fetch'] = (bool) ($request['allow_http_fetch'] ?? false);
 
             return $this->insertJob($userId, 'agent.task', $continuePayload);
         }
@@ -424,6 +503,9 @@ final class JobService
         }
         if (isset($fields['disabled_tools']) && is_array($fields['disabled_tools'])) {
             $payload['disabled_tools'] = array_values($fields['disabled_tools']);
+        }
+        if (array_key_exists('allow_http_fetch', $fields)) {
+            $payload['allow_http_fetch'] = (bool) $fields['allow_http_fetch'];
         }
 
         return $this->createTyped($userId, $type, $payload);

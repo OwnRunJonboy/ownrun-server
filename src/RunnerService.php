@@ -18,6 +18,10 @@ final class RunnerService
      * @param string|null $timezone IANA name from the runner
      * @param bool|null $ollamaWebSearch Runner reports search is configured
      * @param list<string>|null $agentToolIds Full runner tool catalog
+     * @param string|null $backendState active_ollama|active_sd|switching|failed
+     * @param bool|null $sdAvailable
+     * @param list<string>|null $sdModels
+     * @param bool|null $ollamaModelsStale
      */
     public function heartbeat(
         int $runnerId,
@@ -28,6 +32,10 @@ final class RunnerService
         ?string $timezone = null,
         ?bool $ollamaWebSearch = null,
         ?array $agentToolIds = null,
+        ?string $backendState = null,
+        ?bool $sdAvailable = null,
+        ?array $sdModels = null,
+        ?bool $ollamaModelsStale = null,
     ): void {
         $sets = ['last_seen_at = NOW()'];
         $params = [];
@@ -61,6 +69,27 @@ final class RunnerService
             $sets[] = 'agent_tool_ids = ?';
             $params[] = json_encode(array_values($agentToolIds));
         }
+        if ($backendState !== null) {
+            $allowed = ['active_ollama', 'active_sd', 'switching', 'failed', ''];
+            $state = trim($backendState);
+            if (!in_array($state, $allowed, true)) {
+                $state = '';
+            }
+            $sets[] = 'backend_state = ?';
+            $params[] = $state !== '' ? $state : null;
+        }
+        if ($sdAvailable !== null) {
+            $sets[] = 'sd_available = ?';
+            $params[] = $sdAvailable ? 1 : 0;
+        }
+        if ($sdModels !== null) {
+            $sets[] = 'sd_models = ?';
+            $params[] = json_encode(array_values($sdModels));
+        }
+        if ($ollamaModelsStale !== null) {
+            $sets[] = 'ollama_models_stale = ?';
+            $params[] = $ollamaModelsStale ? 1 : 0;
+        }
 
         $params[] = $runnerId;
         $sql = 'UPDATE runners SET ' . implode(', ', $sets) . ' WHERE id = ?';
@@ -77,7 +106,11 @@ final class RunnerService
      *   agent_projects: list<string>,
      *   timezone: string,
      *   web_search_available: bool,
-     *   agent_tool_ids: list<string>
+     *   agent_tool_ids: list<string>,
+     *   backend_state: ?string,
+     *   sd_available: bool,
+     *   sd_models: list<string>,
+     *   ollama_models_stale: bool
      * }
      */
     public function status(): array
@@ -86,6 +119,7 @@ final class RunnerService
         $stmt = $this->db->query(
             "SELECT last_seen_at, available_models, agent_profiles, agent_models, agent_projects,
                     timezone, ollama_web_search, agent_tool_ids,
+                    backend_state, sd_available, sd_models, ollama_models_stale,
                     (last_seen_at IS NOT NULL
                      AND last_seen_at >= DATE_SUB(NOW(), INTERVAL {$window} SECOND)) AS online
              FROM runners WHERE enabled = 1 ORDER BY last_seen_at DESC LIMIT 1"
@@ -101,6 +135,10 @@ final class RunnerService
         $lastSeen = null;
         $online = false;
         $webSearchAvailable = false;
+        $backendState = null;
+        $sdAvailable = false;
+        $sdModels = [];
+        $ollamaModelsStale = false;
         if ($row) {
             $lastSeen = $row['last_seen_at'];
             $online = (int) $row['online'] === 1;
@@ -119,6 +157,15 @@ final class RunnerService
             if ($row['ollama_web_search'] !== null) {
                 $webSearchAvailable = (int) $row['ollama_web_search'] === 1;
             }
+            $bs = trim((string) ($row['backend_state'] ?? ''));
+            $backendState = $bs !== '' ? $bs : null;
+            if ($row['sd_available'] !== null) {
+                $sdAvailable = (int) $row['sd_available'] === 1;
+            }
+            $sdModels = $this->decodeStringList($row['sd_models'] ?? null);
+            if ($row['ollama_models_stale'] !== null) {
+                $ollamaModelsStale = (int) $row['ollama_models_stale'] === 1;
+            }
         }
 
         return [
@@ -131,6 +178,10 @@ final class RunnerService
             'timezone' => $timezone,
             'web_search_available' => $webSearchAvailable,
             'agent_tool_ids' => $agentToolIds,
+            'backend_state' => $backendState,
+            'sd_available' => $sdAvailable,
+            'sd_models' => $sdModels,
+            'ollama_models_stale' => $ollamaModelsStale,
         ];
     }
 

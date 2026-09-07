@@ -11,6 +11,15 @@ final class Request
         return strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
     }
 
+    public static function clientIp(): string
+    {
+        $ip = $_SERVER['REMOTE_ADDR'] ?? '';
+        if (is_string($ip) && filter_var($ip, FILTER_VALIDATE_IP)) {
+            return $ip;
+        }
+        return '0.0.0.0';
+    }
+
     public static function bearerToken(): ?string
     {
         $header = $_SERVER['HTTP_AUTHORIZATION']
