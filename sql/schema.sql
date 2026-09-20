@@ -204,7 +204,7 @@ CREATE TABLE IF NOT EXISTS kb_documents (
     user_id INT UNSIGNED NOT NULL,
     filename VARCHAR(255) NOT NULL,
     content_type VARCHAR(128) NOT NULL,
-    format ENUM('pdf', 'docx', 'epub') NOT NULL,
+    format ENUM('pdf', 'docx', 'epub', 'md', 'txt') NOT NULL,
     size_bytes INT UNSIGNED NOT NULL,
     storage_path VARCHAR(512) NOT NULL,
     status ENUM('pending', 'queued', 'running', 'ready', 'failed', 'deleting') NOT NULL DEFAULT 'pending',

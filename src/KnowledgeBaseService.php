@@ -27,6 +27,16 @@ final class KnowledgeBaseService
             'application/zip',
             'application/octet-stream',
         ],
+        'md' => [
+            'text/markdown',
+            'text/x-markdown',
+            'text/plain',
+            'application/octet-stream',
+        ],
+        'txt' => [
+            'text/plain',
+            'application/octet-stream',
+        ],
     ];
 
     public function __construct(
@@ -264,7 +274,7 @@ final class KnowledgeBaseService
         $filename = $this->sanitizeFilename($originalName);
         $format = $this->detectFormat($filename, (string) ($file['type'] ?? ''));
         if ($format === null) {
-            throw new \InvalidArgumentException('Only PDF, DOCX, and EPUB uploads are supported');
+            throw new \InvalidArgumentException('Only PDF, DOCX, EPUB, Markdown, and TXT uploads are supported');
         }
 
         $tmp = (string) ($file['tmp_name'] ?? '');
@@ -890,6 +900,9 @@ final class KnowledgeBaseService
     private function detectFormat(string $filename, string $mime): ?string
     {
         $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+        if ($ext === 'markdown') {
+            $ext = 'md';
+        }
         if (!isset(self::ALLOWED_FORMATS[$ext])) {
             return null;
         }
@@ -907,6 +920,8 @@ final class KnowledgeBaseService
             'pdf' => 'application/pdf',
             'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             'epub' => 'application/epub+zip',
+            'md' => 'text/markdown',
+            'txt' => 'text/plain',
             default => $uploaded !== '' ? $uploaded : 'application/octet-stream',
         };
     }

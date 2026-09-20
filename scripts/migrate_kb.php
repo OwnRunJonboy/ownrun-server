@@ -62,6 +62,25 @@ if (!tableExists($pdo, 'kb_bases') || !tableExists($pdo, 'kb_documents')) {
     $changes++;
 }
 
+if (tableExists($pdo, 'kb_documents')) {
+    $stmt = $pdo->prepare(
+        'SELECT COLUMN_TYPE FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?'
+    );
+    $stmt->execute(['kb_documents', 'format']);
+    $formatType = (string) $stmt->fetchColumn();
+    $wanted = ["'pdf'", "'docx'", "'epub'", "'md'", "'txt'"];
+    $missing = array_filter($wanted, static fn(string $v): bool => !str_contains($formatType, $v));
+    if ($formatType !== '' && $missing !== []) {
+        $pdo->exec(
+            "ALTER TABLE kb_documents
+             MODIFY COLUMN format ENUM('pdf', 'docx', 'epub', 'md', 'txt') NOT NULL"
+        );
+        echo 'Updated kb_documents.format (' . implode(', ', $missing) . ")\n";
+        $changes++;
+    }
+}
+
 $storage = $config['kb_storage_path'] ?? (dirname(__DIR__) . '/storage/kb');
 if (!is_dir($storage)) {
     if (!mkdir($storage, 0750, true) && !is_dir($storage)) {
