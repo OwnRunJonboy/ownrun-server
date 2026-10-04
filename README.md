@@ -49,3 +49,7 @@ php -S localhost:8080 -t api api/index.php
 ```
 
 Then use `http://localhost:8080` as the API base (paths like `/auth/login` — no `/api` prefix when using the built-in server directly). Apache local layout uses `http://localhost/ownrun-server/api/index.php/...`.
+
+## License
+
+OwnRun is distributed under the [GNU Affero General Public License v3](COPYING.txt) (AGPL-3.0).
